@@ -2,7 +2,7 @@
 Aura Gateway Core - Production Vectorless RAG Engine
 ===================================================
 Layout-aware, structure-first RAG engine using Docling layout parsing,
-Async OpenAI, dual-tree index navigation, layered multi-pass routing,
+LiteLLM Gateway integration, dual-tree index navigation, layered multi-pass routing,
 and immutable filesystem caching. Integrated with LangGraph state.
 """
 
@@ -20,8 +20,9 @@ from pydantic import BaseModel, Field
 from docling.document_converter import DocumentConverter
 from docling_core.types.doc import DocItemLabel
 
-# Async OpenAI SDK
-from openai import AsyncOpenAI
+# Gateway Interoperability SDK (LiteLLM + Instructor)
+import instructor
+from litellm import acompletion
 
 # LangGraph Core Integrations
 from langchain_core.messages import AIMessage
@@ -29,6 +30,9 @@ from app.state import GraphState
 
 logger = logging.getLogger("vectorless_rag")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+# Wrap LiteLLM with Instructor for Gateway Structured Output calls
+instructor_client = instructor.from_litellm(acompletion)
 
 
 # =====================================================================
@@ -61,11 +65,10 @@ class IntentAndRoutingOutput(BaseModel):
 # 2. VECTORLESS ENGINE & PARSER SERVICE
 # =====================================================================
 class VectorlessEngine:
-    def __init__(self, cache_dir: str = ".vectorless_cache", openai_api_key: Optional[str] = None):
+    def __init__(self, cache_dir: str = ".vectorless_cache"):
         self.converter = DocumentConverter()
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        self.client = AsyncOpenAI(api_key=openai_api_key or os.getenv("OPENAI_API_KEY"))
 
     def compute_file_hash(self, file_path: str) -> str:
         """Computes SHA-256 fingerprint for immutable document caching."""
@@ -124,19 +127,28 @@ class VectorlessEngine:
         return root
 
     async def generate_node_summaries(self, node: TreeNode):
-        """Generates fast 1-2 sentence abstracts for each section asynchronously."""
+        """Generates fast 1-2 sentence abstracts for each section asynchronously via Gateway with Rate-Limit Failover."""
         raw_text = "\n".join(node.content_blocks)
+        primary_model = os.getenv("LLM_RAG_PRIMARY_MODEL", "gemini/gemini-2.5-flash")
+        fallback_model = os.getenv("LLM_RAG_FALLBACK_MODEL", "openrouter/nvidia/nemotron-3-ultra:free")
+
         if raw_text:
-            response = await self.client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": "Summarize the key information in this section in 1-2 clear sentences."},
-                    {"role": "user", "content": f"Section: {node.title}\nContent:\n{raw_text[:1500]}"}
-                ],
-                max_tokens=90,
-                temperature=0.0
-            )
-            node.summary = response.choices[0].message.content.strip()
+            try:
+                response = await acompletion(
+                    model=primary_model,
+                    messages=[
+                        {"role": "system", "content": "Summarize the key information in this section in 1-2 clear sentences."},
+                        {"role": "user", "content": f"Section: {node.title}\nContent:\n{raw_text[:1500]}"}
+                    ],
+                    max_tokens=90,
+                    temperature=0.0,
+                    fallbacks=[fallback_model],
+                    num_retries=2,
+                )
+                node.summary = response.choices[0].message.content.strip()
+            except Exception as e:
+                logger.warning(f"Failed to generate summary for section '{node.title}': {e}")
+                node.summary = f"Section text content under {node.title}"
         else:
             node.summary = f"Section topic group under {node.title}"
 
@@ -176,18 +188,22 @@ class VectorlessEngine:
 
 
 # =====================================================================
-# 3. LAYERED ROUTER LOGIC
+# 3. LAYERED ROUTER LOGIC (Gateway Unified Call with Failover)
 # =====================================================================
 class VectorlessRouter:
     def __init__(self, engine: VectorlessEngine):
         self.engine = engine
 
-    async def route(self, query: str, root_tree: TreeNode) -> Tuple[bool, List[str]]:
+    async def route(self, query: str, root_tree: TreeNode) -> Tuple[bool, List[str], Any]:
         """
-        Executes 2-pass layered navigation + query intent classification.
+        Executes 2-pass layered navigation + query intent classification using Instructor + LiteLLM.
         Pass 1: Inspects Level-1 top chapters & detects global vs point intent.
         Pass 2: If point query, inspects leaf subsections under selected chapters only.
+        Automatically falls back to Nvidia Nemotron if Gemini hits 15 RPM rate limits.
         """
+        primary_model = os.getenv("LLM_RAG_PRIMARY_MODEL", "gemini/gemini-2.5-flash")
+        fallback_model = os.getenv("LLM_RAG_FALLBACK_MODEL", "openrouter/nvidia/nemotron-3-ultra:free")
+
         # PASS 1: Evaluate Top-Level Chapters
         top_level_index = self.engine.get_lightweight_index(root_tree, max_depth=1)
 
@@ -203,18 +219,18 @@ Top-Level Document Index:
 
 User Query: {query}"""
 
-        pass1_res = await self.engine.client.beta.chat.completions.parse(
-            model="gpt-4o-mini",
+        p1_data, pass1_raw = await instructor_client.chat.completions.create_with_completion(
+            model=primary_model,
             messages=[{"role": "user", "content": pass1_prompt}],
-            response_format=IntentAndRoutingOutput,
-            temperature=0.0
+            response_model=IntentAndRoutingOutput,
+            temperature=0.0,
+            fallbacks=[fallback_model],
+            max_retries=2,
         )
-
-        p1_data = pass1_res.choices[0].message.parsed
 
         if p1_data.is_global_query:
             logger.info("🌐 [ROUTER] Global query intent detected -> Triggering root summary path.")
-            return True, [root_tree.node_id]
+            return True, [root_tree.node_id], getattr(pass1_raw, "usage", None)
 
         top_chapter_ids = p1_data.target_node_ids
         logger.info(f"🔍 [PASS 1 ROUTING] Target Chapters Selected: {top_chapter_ids}")
@@ -233,16 +249,18 @@ Selected Chapter Trees:
 
 User Query: {query}"""
 
-        pass2_res = await self.engine.client.beta.chat.completions.parse(
-            model="gpt-4o-mini",
+        p2_data, pass2_raw = await instructor_client.chat.completions.create_with_completion(
+            model=primary_model,
             messages=[{"role": "user", "content": pass2_prompt}],
-            response_format=IntentAndRoutingOutput,
-            temperature=0.0
+            response_model=IntentAndRoutingOutput,
+            temperature=0.0,
+            fallbacks=[fallback_model],
+            max_retries=2,
         )
 
-        final_node_ids = pass2_res.choices[0].message.parsed.target_node_ids
+        final_node_ids = p2_data.target_node_ids
         logger.info(f"🎯 [PASS 2 ROUTING] Final Target Leaf Node IDs: {final_node_ids}")
-        return False, final_node_ids
+        return False, final_node_ids, getattr(pass2_raw, "usage", None)
 
 
 # =====================================================================
@@ -259,7 +277,7 @@ def fetch_node_content(node: TreeNode, target_ids: List[str]) -> List[str]:
 
 
 async def answer_vectorless_query(query: str, file_path: str, engine: VectorlessEngine) -> Dict[str, Any]:
-    """End-to-end processing function for an incoming query and file path."""
+    """End-to-end processing function for an incoming query and file path using Gateway calls with Rate-Limit Failover."""
     file_hash = engine.compute_file_hash(file_path)
 
     # 1. Ingestion / Cache Lookup
@@ -272,7 +290,7 @@ async def answer_vectorless_query(query: str, file_path: str, engine: Vectorless
 
     # 2. Layered Routing
     router = VectorlessRouter(engine)
-    is_global, target_ids = await router.route(query, root_tree)
+    is_global, target_ids, route_usage = await router.route(query, root_tree)
 
     # 3. Direct Content Retrieval
     if is_global:
@@ -283,7 +301,7 @@ async def answer_vectorless_query(query: str, file_path: str, engine: Vectorless
         context_blocks = fetch_node_content(root_tree, target_ids)
         context_str = "\n\n".join(context_blocks)
 
-    # 4. Grounded Synthesis
+    # 4. Grounded Synthesis via Gateway LLM (Gemini 2.5 Flash + Nvidia Nemotron Failover)
     synthesis_prompt = f"""Answer the question grounded strictly in the provided document context.
 Provide inline citations including section names and page numbers.
 
@@ -292,10 +310,15 @@ Context:
 
 Question: {query}"""
 
-    response = await engine.client.chat.completions.create(
-        model="gpt-4o-mini",
+    primary_model = os.getenv("LLM_RAG_PRIMARY_MODEL", "gemini/gemini-2.5-flash")
+    fallback_model = os.getenv("LLM_RAG_FALLBACK_MODEL", "openrouter/nvidia/nemotron-3-ultra:free")
+
+    response = await acompletion(
+        model=primary_model,
         messages=[{"role": "user", "content": synthesis_prompt}],
-        temperature=0.0
+        temperature=0.0,
+        fallbacks=[fallback_model],
+        num_retries=2,
     )
 
     return {
@@ -303,7 +326,7 @@ Question: {query}"""
         "is_global": is_global,
         "selected_nodes": target_ids,
         "file_hash": file_hash,
-        "usage": response.usage
+        "usage": getattr(response, "usage", None)
     }
 
 
@@ -318,18 +341,19 @@ async def rag_node(state: GraphState) -> Dict[str, Any]:
     LangGraph execution node for the Vectorless RAG Engine.
     Interprets resolved queries from staged action payload and executes page-index RAG.
     """
-    logger.info("📚 [RAG NODE] Processing query via Vectorless RAG...")
+    logger.info("📚 [RAG NODE] Processing query via Vectorless RAG Engine...")
 
     resolved_query = state.staged_action_payload.get("resolved_query") if state.staged_action_payload else None
     if not resolved_query and state.messages:
-        resolved_query = str(state.messages[-1].content)
+        raw_msg = state.messages[-1].content
+        resolved_query = raw_msg if isinstance(raw_msg, str) else str(raw_msg)
 
     doc_path = state.router_state.last_document_ref
 
     if not doc_path or not os.path.exists(doc_path):
         return {
             "messages": [AIMessage(content="Please upload a valid document first to proceed with document-grounded Q&A.")],
-            "validation_errors": [f"Document path '{doc_path}' not found or unaccessible."]
+            "validation_errors": [f"Document path '{doc_path}' not found or inaccessible."]
         }
 
     try:
@@ -339,9 +363,9 @@ async def rag_node(state: GraphState) -> Dict[str, Any]:
             engine=_vectorless_engine_instance
         )
 
-        # Log usage to FinOps Ledger if available
+        # Log usage to FinOps Ledger
         new_finops_ledger = state.finops_ledger.model_copy(deep=True)
-        if "usage" in result and result["usage"]:
+        if result.get("usage"):
             usage = result["usage"]
             new_finops_ledger.log_transaction_usage(
                 model_response_metadata={
@@ -362,6 +386,6 @@ async def rag_node(state: GraphState) -> Dict[str, Any]:
     except Exception as exc:
         logger.error(f"❌ [RAG NODE ERROR] Vectorless query failed: {exc}")
         return {
-            "messages": [AIMessage(content="I encountered an issue analyzing the document structure.")],
+            "messages": [AIMessage(content="I encountered an issue analyzing the document structure across primary and fallback inference endpoints.")],
             "validation_errors": [str(exc)]
         }
