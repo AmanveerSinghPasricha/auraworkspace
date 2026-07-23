@@ -24,8 +24,9 @@ from docling_core.types.doc import DocItemLabel
 import instructor
 from litellm import acompletion
 
-# LangGraph Core Integrations
+# LangGraph Core Integrations & Centralized Settings
 from langchain_core.messages import AIMessage
+from app.config import settings
 from app.state import GraphState
 
 logger = logging.getLogger("vectorless_rag")
@@ -129,20 +130,18 @@ class VectorlessEngine:
     async def generate_node_summaries(self, node: TreeNode):
         """Generates fast 1-2 sentence abstracts for each section asynchronously via Gateway with Rate-Limit Failover."""
         raw_text = "\n".join(node.content_blocks)
-        primary_model = os.getenv("LLM_RAG_PRIMARY_MODEL", "gemini/gemini-2.5-flash")
-        fallback_model = os.getenv("LLM_RAG_FALLBACK_MODEL", "openrouter/nvidia/nemotron-3-ultra:free")
 
         if raw_text:
             try:
                 response = await acompletion(
-                    model=primary_model,
+                    model=settings.LLM_RAG_PRIMARY,
                     messages=[
                         {"role": "system", "content": "Summarize the key information in this section in 1-2 clear sentences."},
                         {"role": "user", "content": f"Section: {node.title}\nContent:\n{raw_text[:1500]}"}
                     ],
                     max_tokens=90,
                     temperature=0.0,
-                    fallbacks=[fallback_model],
+                    fallbacks=[settings.LLM_RAG_FALLBACK],
                     num_retries=2,
                 )
                 node.summary = response.choices[0].message.content.strip()
@@ -199,11 +198,8 @@ class VectorlessRouter:
         Executes 2-pass layered navigation + query intent classification using Instructor + LiteLLM.
         Pass 1: Inspects Level-1 top chapters & detects global vs point intent.
         Pass 2: If point query, inspects leaf subsections under selected chapters only.
-        Automatically falls back to Nvidia Nemotron if Gemini hits 15 RPM rate limits.
+        Automatically falls back to Nvidia Nemotron if Gemini hits rate limits.
         """
-        primary_model = os.getenv("LLM_RAG_PRIMARY_MODEL", "gemini/gemini-2.5-flash")
-        fallback_model = os.getenv("LLM_RAG_FALLBACK_MODEL", "openrouter/nvidia/nemotron-3-ultra:free")
-
         # PASS 1: Evaluate Top-Level Chapters
         top_level_index = self.engine.get_lightweight_index(root_tree, max_depth=1)
 
@@ -220,11 +216,11 @@ Top-Level Document Index:
 User Query: {query}"""
 
         p1_data, pass1_raw = await instructor_client.chat.completions.create_with_completion(
-            model=primary_model,
+            model=settings.LLM_RAG_PRIMARY,
             messages=[{"role": "user", "content": pass1_prompt}],
             response_model=IntentAndRoutingOutput,
             temperature=0.0,
-            fallbacks=[fallback_model],
+            fallbacks=[settings.LLM_RAG_FALLBACK],
             max_retries=2,
         )
 
@@ -250,11 +246,11 @@ Selected Chapter Trees:
 User Query: {query}"""
 
         p2_data, pass2_raw = await instructor_client.chat.completions.create_with_completion(
-            model=primary_model,
+            model=settings.LLM_RAG_PRIMARY,
             messages=[{"role": "user", "content": pass2_prompt}],
             response_model=IntentAndRoutingOutput,
             temperature=0.0,
-            fallbacks=[fallback_model],
+            fallbacks=[settings.LLM_RAG_FALLBACK],
             max_retries=2,
         )
 
@@ -310,14 +306,11 @@ Context:
 
 Question: {query}"""
 
-    primary_model = os.getenv("LLM_RAG_PRIMARY_MODEL", "gemini/gemini-2.5-flash")
-    fallback_model = os.getenv("LLM_RAG_FALLBACK_MODEL", "openrouter/nvidia/nemotron-3-ultra:free")
-
     response = await acompletion(
-        model=primary_model,
+        model=settings.LLM_RAG_PRIMARY,
         messages=[{"role": "user", "content": synthesis_prompt}],
         temperature=0.0,
-        fallbacks=[fallback_model],
+        fallbacks=[settings.LLM_RAG_FALLBACK],
         num_retries=2,
     )
 
