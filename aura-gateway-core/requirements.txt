@@ -10,7 +10,7 @@ pydantic-settings>=2.2.0
 
 # LLM Gateway, Structured Outputs & Tokenizer
 instructor>=1.3.0
-litellm>=1.40.0
+litellm>=1.40.0,<2.0.0
 tiktoken>=0.7.0
 
 # Security, Auth & Presidio PII Engine
