@@ -15,7 +15,7 @@ import json
 import logging
 from typing import Dict, Any, List, Optional
 import tiktoken
-from litellm import acompletion, astream_completion
+from litellm import acompletion
 from langchain_core.messages import AIMessage, BaseMessage, trim_messages
 from langgraph.store.base import BaseStore
 
