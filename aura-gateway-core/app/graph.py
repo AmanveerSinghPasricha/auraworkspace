@@ -15,7 +15,7 @@ from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.store.postgres.aio import AsyncPostgresStore
 
 from app.state import GraphState
-from app.nodes.pii import pii_redaction_node
+from app.nodes.pii_security import pii_redaction_node
 from app.nodes.router import supervisor_router_node
 from app.nodes.rag import rag_node
 from app.nodes.general import general_agent_node
