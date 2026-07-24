@@ -39,25 +39,25 @@ async def lifespan(app: FastAPI):
     Ensures safe resource cleanup on shutdown.
     """
     global compiled_aura_graph
-    logger.info("?? [GATEWAY STARTUP] Initializing Aura Gateway Core server...")
+    logger.info("🚀 [GATEWAY STARTUP] Initializing Aura Gateway Core server...")
 
     try:
         # Initialize Neon Postgres connection pool
         pool = await get_db_pool()
-        logger.info("? [DATABASE] Database connection pool established successfully.")
+        logger.info("✅ [DATABASE] Database connection pool established successfully.")
 
         # Compile the master state graph
         compiled_aura_graph = create_aura_graph(checkpointer=None, store=None)
-        logger.info("? [GRAPH LOADED] Master LangGraph engine ready for requests.")
+        logger.info("✅ [GRAPH LOADED] Master LangGraph engine ready for requests.")
 
     except Exception as exc:
-        logger.error(f"? [STARTUP ERROR] Failed to initialize resources: {exc}")
+        logger.error(f"❌ [STARTUP ERROR] Failed to initialize resources: {exc}")
         # Compile fallback graph for local execution/testing
         compiled_aura_graph = create_aura_graph()
 
     yield
 
-    logger.info("?? [GATEWAY SHUTDOWN] Cleaning up database connection pool...")
+    logger.info("🛑 [GATEWAY SHUTDOWN] Cleaning up database connection pool...")
     await close_db_pool()
 
 
@@ -104,6 +104,19 @@ class ChatResponsePayload(BaseModel):
 # =====================================================================
 # 4. API ENDPOINTS
 # =====================================================================
+@app.get("/", tags=["System"])
+async def root_status():
+    """
+    Root status endpoint providing basic server metadata and documentation links.
+    """
+    return {
+        "service": getattr(settings, "APP_NAME", "Aura Gateway Core"),
+        "status": "online",
+        "docs": "/docs",
+        "health": "/health"
+    }
+
+
 @app.get("/health", tags=["System"])
 async def health_check():
     """
@@ -113,11 +126,13 @@ async def health_check():
     db_healthy = False
     try:
         pool = await get_db_pool()
-        async with pool.acquire() as conn:
-            await conn.execute("SELECT 1")
-        db_healthy = True
+        # psycopg_pool uses .connection() context manager
+        async with pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT 1;")
+                db_healthy = True
     except Exception as exc:
-        logger.error(f"?? [HEALTH CHECK] Database ping failed: {exc}")
+        logger.error(f"❌ [HEALTH CHECK] Database ping failed: {exc}")
 
     is_healthy = (compiled_aura_graph is not None) and db_healthy
 
@@ -144,7 +159,7 @@ async def execute_chat_query(payload: ChatRequestPayload):
             detail="State graph engine is not initialized.",
         )
 
-    logger.info(f"?? [REQUEST] Processing query for thread '{payload.thread_id}' from user '{payload.user_id}'...")
+    logger.info(f"📩 [REQUEST] Processing query for thread '{payload.thread_id}' from user '{payload.user_id}'...")
 
     # Build UserProfileContext
     user_context = UserProfileContext(
@@ -191,7 +206,7 @@ async def execute_chat_query(payload: ChatRequestPayload):
         )
 
     except Exception as exc:
-        logger.error(f"? [GATEWAY EXECUTION ERROR] Workflow execution failed: {exc}")
+        logger.error(f"❌ [GATEWAY EXECUTION ERROR] Workflow execution failed: {exc}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Execution engine failure: {str(exc)}",
