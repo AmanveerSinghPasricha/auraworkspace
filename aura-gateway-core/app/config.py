@@ -7,6 +7,9 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
+    # App Settings
+    APP_NAME: str = "Aura Gateway Core"
+
     # API Provider Keys
     groq_api_key: str = os.getenv("GROQ_API_KEY", "")
     gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
@@ -19,8 +22,11 @@ class Settings(BaseSettings):
     LLM_RAG_PRIMARY: str = "gemini/gemini-2.5-flash"
     LLM_RAG_FALLBACK: str = "openrouter/nvidia/nemotron-3-ultra:free"
 
-    LLM_GENERAL_PRIMARY: str = "groq/openai/gpt-oss-120b"
-    LLM_GENERAL_FALLBACK: str = "groq/llama-3.3-70b-versatile"
+    LLM_EXTRACTOR_PRIMARY: str = "gemini/gemini-2.5-flash"
+    LLM_EXTRACTOR_FALLBACK: str = "groq/llama-3.3-70b-versatile"
+
+    LLM_GENERAL_PRIMARY: str = "groq/llama-3.3-70b-versatile"
+    LLM_GENERAL_FALLBACK: str = "groq/llama-3.1-8b-instant"
 
     class Config:
         env_file = ".env"

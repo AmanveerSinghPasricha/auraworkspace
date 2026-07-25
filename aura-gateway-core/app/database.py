@@ -32,23 +32,37 @@ if not NEON_DATABASE_URL:
         "Please ensure you have defined DATABASE_URL in your .env file."
     )
 
+# Async Connection Pool optimized for Neon Serverless PgBouncer
 postgres_connection_pool: AsyncConnectionPool = AsyncConnectionPool(
     conninfo=NEON_DATABASE_URL,
+    min_size=1,
     max_size=20,
+    max_idle=300,             # Drop connections idle for >5 mins to align with Neon suspend
+    max_lifetime=1800,        # Periodically recycle connections every 30 minutes
+    reconnect_timeout=10,     # Time to wait during cold-start reconnections
     open=False,
-    kwargs={"autocommit": True, "prepare_threshold": 0},
+    kwargs={
+        "autocommit": True,
+        "prepare_threshold": 0,  # Required for PgBouncer / Neon transaction pooling
+        "keepalives": 1,
+        "keepalives_idle": 30,
+        "keepalives_interval": 10,
+        "keepalives_count": 5,
+    },
 )
 
 
 async def get_db_pool() -> AsyncConnectionPool:
+    """Returns an active PostgreSQL async connection pool instance."""
     if postgres_connection_pool.closed:
-        logger.info("?? [DATABASE INIT] Opening serverless PostgreSQL connection pool...")
+        logger.info("? [DATABASE INIT] Opening serverless PostgreSQL connection pool...")
         await postgres_connection_pool.open()
         logger.info("? [DATABASE INIT] Connection pool opened successfully.")
     return postgres_connection_pool
 
 
 async def close_db_pool():
+    """Safely closes active connection pools on shutdown."""
     if not postgres_connection_pool.closed:
         logger.info("?? [DATABASE CLOSE] Closing PostgreSQL connection pool...")
         await postgres_connection_pool.close()
@@ -57,6 +71,7 @@ async def close_db_pool():
 
 @asynccontextmanager
 async def get_checkpointer() -> AsyncGenerator[AsyncPostgresSaver, None]:
+    """Yields a thread-safe AsyncPostgresSaver checkpointer context for LangGraph state management."""
     logger.info("?? [DATABASE CHECKPOINTER] Acquiring database connection for checkpointer...")
     try:
         pool = await get_db_pool()
@@ -71,6 +86,7 @@ async def get_checkpointer() -> AsyncGenerator[AsyncPostgresSaver, None]:
 
 @asynccontextmanager
 async def get_long_term_store() -> AsyncGenerator[AsyncPostgresStore, None]:
+    """Yields a thread-safe AsyncPostgresStore context for persistent long-term memory."""
     logger.info("?? [DATABASE STORE] Acquiring database connection for long-term store...")
     try:
         pool = await get_db_pool()
