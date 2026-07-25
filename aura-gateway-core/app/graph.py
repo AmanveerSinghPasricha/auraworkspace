@@ -101,22 +101,3 @@ def create_aura_graph(
 
     logger.info("? [GRAPH BUILD] Aura Workspace State Graph compiled successfully!")
     return compiled_app
-
-if __name__ == "__main__":
-    from app.graph import create_aura_graph
-
-    app = create_aura_graph()
-
-    try:
-        # Generate PNG byte data using pygraphviz / Mermaid
-        graph_png = app.get_graph().draw_mermaid_png()
-        
-        # Save to disk
-        with open("aura_graph_architecture.png", "wb") as f:
-            f.write(graph_png)
-            
-        print("✅ Graph diagram saved successfully as 'aura_graph_architecture.png'")
-    except Exception as e:
-        print(f"⚠️ Could not generate PNG directly: {e}")
-        print("💡 Alternative: Copy the Mermaid string below and paste into https://mermaid.live")
-        print("\n" + app.get_graph().draw_mermaid())
