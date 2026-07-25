@@ -1,6 +1,12 @@
+import sys
+import asyncio
 import pytest
 from langchain_core.messages import HumanMessage
 from app.state import UserProfileContext
+
+# Fix Psycopg async event loop compatibility on Windows
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 @pytest.fixture
 def mock_user_context():

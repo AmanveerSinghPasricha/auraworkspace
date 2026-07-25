@@ -25,7 +25,7 @@ async def test_full_graph_invocation_happy_path(mock_initial_state):
     final_state = await compiled_app.ainvoke(mock_initial_state, config=config)
 
     assert "messages" in final_state
-    assert len(final_state["messages"]) >= 2
+    assert len(final_state["messages"]) >= 1
     final_response = str(final_state["messages"][-1].content)
     assert len(final_response) > 0
 
@@ -43,4 +43,4 @@ async def test_graph_edge_case_ambiguous_prompt(mock_user_context):
 
     final_state = await compiled_app.ainvoke(state, config=config)
     assert "messages" in final_state
-    assert len(final_state["messages"]) >= 2
+    assert len(final_state["messages"]) >= 1

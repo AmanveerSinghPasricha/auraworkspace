@@ -29,10 +29,13 @@ async def pii_redaction_node(state: GraphState) -> Dict[str, Any]:
     """
     logger.info("🛡️ [PII GUARDRAIL] Running Presidio Engine...")
 
-    if not state.messages:
+    # Extract messages safely whether state is a dict or GraphState object
+    messages = state.get("messages", []) if isinstance(state, dict) else getattr(state, "messages", [])
+
+    if not messages:
         return {"validation_errors": ["No messages found in state for security evaluation."]}
 
-    latest_msg = state.messages[-1]
+    latest_msg = messages[-1]
     if not isinstance(latest_msg, HumanMessage):
         return {}  # Proceed if not direct human prompt
 
@@ -63,10 +66,13 @@ async def pii_redaction_node(state: GraphState) -> Dict[str, Any]:
 
     output_messages.append(HumanMessage(content=clean_text))
 
+    # Extract staged_action_payload safely
+    staged_payload = state.get("staged_action_payload") if isinstance(state, dict) else getattr(state, "staged_action_payload", {})
+
     return {
         "messages": output_messages,
         "staged_action_payload": {
-            **(state.staged_action_payload or {}),
+            **(staged_payload or {}),
             "resolved_query": clean_text,
         },
         "validation_errors": []
