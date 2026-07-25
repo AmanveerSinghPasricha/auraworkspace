@@ -108,11 +108,15 @@ def prepare_extraction_payload(
 async def data_extractor_node(state: GraphState) -> Dict[str, Any]:
     logger.info("?? [EXTRACTOR NODE] Executing resilient extraction pipeline...")
 
+    # Safely extract state attributes whether state is a dict or GraphState object
+    staged_payload = state.get("staged_action_payload") if isinstance(state, dict) else getattr(state, "staged_action_payload", {})
+    messages = state.get("messages", []) if isinstance(state, dict) else getattr(state, "messages", [])
+
     raw_prompt = ""
-    if state.staged_action_payload and state.staged_action_payload.get("resolved_query"):
-        raw_prompt = state.staged_action_payload["resolved_query"]
-    elif state.messages:
-        raw_prompt = str(state.messages[-1].content)
+    if staged_payload and staged_payload.get("resolved_query"):
+        raw_prompt = staged_payload["resolved_query"]
+    elif messages:
+        raw_prompt = str(messages[-1].content)
 
     if not raw_prompt:
         return {
@@ -133,7 +137,7 @@ async def data_extractor_node(state: GraphState) -> Dict[str, Any]:
     )
 
     llm_payload = prepare_extraction_payload(
-        messages=state.messages,
+        messages=messages,
         system_prompt=system_prompt,
         max_tokens=4000
     )
@@ -171,8 +175,10 @@ async def data_extractor_node(state: GraphState) -> Dict[str, Any]:
         if parsed_dict.get("summary_notes"):
             markdown_table += f"\n\n**Notes:** {parsed_dict['summary_notes']}"
 
-        new_finops_ledger = state.finops_ledger.model_copy(deep=True)
-        if hasattr(raw_completion, "usage") and raw_completion.usage:
+        finops_ledger = state.get("finops_ledger") if isinstance(state, dict) else getattr(state, "finops_ledger", None)
+        new_finops_ledger = finops_ledger.model_copy(deep=True) if finops_ledger else None
+
+        if new_finops_ledger and hasattr(raw_completion, "usage") and raw_completion.usage:
             usage = raw_completion.usage
             new_finops_ledger.log_transaction_usage(
                 model_response_metadata={
@@ -187,12 +193,14 @@ async def data_extractor_node(state: GraphState) -> Dict[str, Any]:
             f"from '{parsed_dict['location_found']}'."
         )
 
-        return {
+        res = {
             "messages": [AIMessage(content=markdown_table)],
             "extracted_data_matrix": parsed_dict,
-            "finops_ledger": new_finops_ledger,
             "validation_errors": []
         }
+        if new_finops_ledger:
+            res["finops_ledger"] = new_finops_ledger
+        return res
 
     except Exception as exc:
         logger.error(f"? [EXTRACTOR ERROR] Structured extraction failed: {exc}")

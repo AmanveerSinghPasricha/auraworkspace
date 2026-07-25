@@ -5,7 +5,7 @@ Features:
 1. Multi-Dimensional Dynamic Persona Engine (XML-structured, role & department aware)
 2. Exact/Semantic SHA-256 Caching (Zero Token Cost for duplicate queries)
 3. Token-Aware Context Window Trimming (Tiktoken BPE, message atomicity preserved)
-4. Token-Level Streaming via LiteLLM `astream_completion`
+4. Token-Level Streaming via LiteLLM `acompletion(..., stream=True)`
 5. Async Long-Term Memory Extraction & Profile Injection
 6. Immutable FinOps Usage & Cost Accounting
 """
@@ -163,7 +163,12 @@ async def general_agent_node(
     """
     logger.info("🤖 [GENERAL AGENT] Executing request with Token-Aware Memory & Multi-Dimensional Persona...")
 
-    user_id = state.user_context.user_id if state.user_context else "default_user"
+    # Extract state safely whether state is a dict or GraphState object
+    user_context = state.get("user_context") if isinstance(state, dict) else getattr(state, "user_context", None)
+    messages = state.get("messages", []) if isinstance(state, dict) else getattr(state, "messages", [])
+    finops_ledger = state.get("finops_ledger") if isinstance(state, dict) else getattr(state, "finops_ledger", None)
+
+    user_id = getattr(user_context, "user_id", "default_user") if user_context else "default_user"
 
     # 1. Fetch Long-Term Memory Profile
     long_term_block = ""
@@ -172,11 +177,11 @@ async def general_agent_node(
         long_term_block = user_memory.to_system_prompt_block()
 
     # 2. Build Dynamic Persona System Prompt
-    system_prompt = build_dynamic_persona(state.user_context, long_term_block)
+    system_prompt = build_dynamic_persona(user_context, long_term_block)
 
     # 3. Format Payload with Token-Aware Short-Term Trimming (Max 4,000 Tokens)
     llm_payload = prepare_messages_token_aware(
-        messages=state.messages,
+        messages=messages,
         system_prompt=system_prompt,
         max_tokens=4000
     )
@@ -187,7 +192,7 @@ async def general_agent_node(
             "validation_errors": ["Empty prompt in general_agent_node."]
         }
 
-    latest_user_prompt = str(state.messages[-1].content) if state.messages else ""
+    latest_user_prompt = str(messages[-1].content) if messages else ""
     cache_key = compute_query_hash(user_id, latest_user_prompt)
 
     # 4. EXACT / SEMANTIC CACHE CHECK
@@ -195,26 +200,30 @@ async def general_agent_node(
         logger.info(f"⚡ [CACHE HIT] Returning cached response for user '{user_id}' at zero token cost.")
         cached_answer = IN_MEMORY_SEMANTIC_CACHE[cache_key]
         
-        new_finops_ledger = state.finops_ledger.model_copy(deep=True)
-        new_finops_ledger.log_transaction_usage(
-            model_response_metadata={"prompt_tokens": 0, "completion_tokens": 0},
-            model_pricing_rates={"in": 0.0, "cached": 0.0, "out": 0.0},
-        )
-        return {
+        new_finops_ledger = finops_ledger.model_copy(deep=True) if finops_ledger else None
+        if new_finops_ledger:
+            new_finops_ledger.log_transaction_usage(
+                model_response_metadata={"prompt_tokens": 0, "completion_tokens": 0},
+                model_pricing_rates={"in": 0.0, "cached": 0.0, "out": 0.0},
+            )
+        res = {
             "messages": [AIMessage(content=f"{cached_answer}\n\n*(⚡ Delivered via Cache)*")],
-            "finops_ledger": new_finops_ledger,
             "validation_errors": []
         }
+        if new_finops_ledger:
+            res["finops_ledger"] = new_finops_ledger
+        return res
 
     # 5. LLM EXECUTION (STREAMING OR BATCH)
     try:
         if stream_tokens:
-            logger.info("🌊 [STREAMING] Initiating token streaming via astream_completion...")
+            logger.info("🌊 [STREAMING] Initiating token streaming via acompletion(..., stream=True)...")
             
-            response_stream = await astream_completion(
+            response_stream = await acompletion(
                 model=settings.LLM_GENERAL_PRIMARY,
                 messages=llm_payload,
                 temperature=0.2,
+                stream=True,
                 fallbacks=[settings.LLM_GENERAL_FALLBACK],
             )
 
@@ -224,7 +233,7 @@ async def general_agent_node(
                 accumulated_chunks.append(content)
             
             answer = "".join(accumulated_chunks)
-            new_finops_ledger = state.finops_ledger.model_copy(deep=True)
+            new_finops_ledger = finops_ledger.model_copy(deep=True) if finops_ledger else None
 
         else:
             response = await acompletion(
@@ -237,8 +246,8 @@ async def general_agent_node(
             answer = response.choices[0].message.content or ""
 
             # Log token usage to FinOps Ledger
-            new_finops_ledger = state.finops_ledger.model_copy(deep=True)
-            if hasattr(response, "usage") and response.usage:
+            new_finops_ledger = finops_ledger.model_copy(deep=True) if finops_ledger else None
+            if new_finops_ledger and hasattr(response, "usage") and response.usage:
                 usage = response.usage
                 new_finops_ledger.log_transaction_usage(
                     model_response_metadata={
@@ -253,7 +262,7 @@ async def general_agent_node(
             IN_MEMORY_SEMANTIC_CACHE[cache_key] = answer
 
         # 7. ASYNCHRONOUS MEMORY EXTRACTION WORKER
-        if store and state.messages:
+        if store and messages:
             await extract_and_update_memory(
                 store=store,
                 user_id=user_id,
@@ -261,11 +270,13 @@ async def general_agent_node(
                 assistant_response=answer
             )
 
-        return {
+        res = {
             "messages": [AIMessage(content=answer)],
-            "finops_ledger": new_finops_ledger,
             "validation_errors": []
         }
+        if new_finops_ledger:
+            res["finops_ledger"] = new_finops_ledger
+        return res
 
     except Exception as exc:
         logger.error(f"❌ [GENERAL AGENT ERROR] Invocation failed: {exc}")

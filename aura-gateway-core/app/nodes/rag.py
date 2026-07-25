@@ -336,12 +336,17 @@ async def rag_node(state: GraphState) -> Dict[str, Any]:
     """
     logger.info("📚 [RAG NODE] Processing query via Vectorless RAG Engine...")
 
-    resolved_query = state.staged_action_payload.get("resolved_query") if state.staged_action_payload else None
-    if not resolved_query and state.messages:
-        raw_msg = state.messages[-1].content
+    # Safely extract state attributes whether state is a dict or GraphState object
+    staged_payload = state.get("staged_action_payload") if isinstance(state, dict) else getattr(state, "staged_action_payload", {})
+    messages = state.get("messages", []) if isinstance(state, dict) else getattr(state, "messages", [])
+    router_state = state.get("router_state") if isinstance(state, dict) else getattr(state, "router_state", None)
+
+    resolved_query = staged_payload.get("resolved_query") if staged_payload else None
+    if not resolved_query and messages:
+        raw_msg = messages[-1].content
         resolved_query = raw_msg if isinstance(raw_msg, str) else str(raw_msg)
 
-    doc_path = state.router_state.last_document_ref
+    doc_path = getattr(router_state, "last_document_ref", None) if router_state else None
 
     if not doc_path or not os.path.exists(doc_path):
         return {
@@ -357,8 +362,10 @@ async def rag_node(state: GraphState) -> Dict[str, Any]:
         )
 
         # Log usage to FinOps Ledger
-        new_finops_ledger = state.finops_ledger.model_copy(deep=True)
-        if result.get("usage"):
+        finops_ledger = state.get("finops_ledger") if isinstance(state, dict) else getattr(state, "finops_ledger", None)
+        new_finops_ledger = finops_ledger.model_copy(deep=True) if finops_ledger else None
+
+        if new_finops_ledger and result.get("usage"):
             usage = result["usage"]
             new_finops_ledger.log_transaction_usage(
                 model_response_metadata={
@@ -370,11 +377,13 @@ async def rag_node(state: GraphState) -> Dict[str, Any]:
                 model_pricing_rates={"in": 0.00000015, "cached": 0.000000075, "out": 0.0000006},
             )
 
-        return {
+        res = {
             "messages": [AIMessage(content=result["answer"])],
-            "finops_ledger": new_finops_ledger,
             "validation_errors": []
         }
+        if new_finops_ledger:
+            res["finops_ledger"] = new_finops_ledger
+        return res
 
     except Exception as exc:
         logger.error(f"❌ [RAG NODE ERROR] Vectorless query failed: {exc}")
