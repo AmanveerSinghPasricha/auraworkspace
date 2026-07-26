@@ -20,7 +20,7 @@ async def test_health_check_endpoint():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get("/health")
 
-    assert response.status_code in (200, 503)  # Validates response structure
+    assert response.status_code in (200, 503)
     data = response.json()
     assert "status" in data
     assert "diagnostics" in data
@@ -41,7 +41,6 @@ async def test_chat_execution_happy_path():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post("/api/v1/chat", json=payload)
 
-    # 200 OK when DB/graph is connected, or 503 if uninitialized
     assert response.status_code in (200, 503)
     data = response.json()
     if response.status_code == 200:
@@ -81,3 +80,19 @@ async def test_chat_stream_endpoint_happy_path():
     if response.status_code == 200:
         assert "text/event-stream" in response.headers.get("content-type", "")
         assert "data:" in response.text
+
+
+@pytest.mark.asyncio
+async def test_document_upload_endpoint():
+    """Verify POST /api/v1/documents/upload processes document files and returns ingestion details."""
+    file_content = b"Aura Gateway Core test document content for Vectorless RAG."
+    files = {"file": ("test_doc.txt", file_content, "text/plain")}
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/v1/documents/upload", files=files)
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "success"
+    assert "file_hash" in data
+    assert "document_ref" in data

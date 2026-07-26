@@ -1,17 +1,20 @@
 """
 Aura Gateway Core - Primary FastAPI Gateway Server
 ==================================================
-Exposes REST and Streaming API endpoints for the multi-agent state graph.
+Exposes REST, Streaming, and Ingestion API endpoints for the multi-agent state graph.
 Handles lifecycle events for Neon Postgres database connection pooling,
 checkpointer initialization, and thread-scoped execution.
 """
 
+import os
+import shutil
 import logging
 import json
+from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Dict, Any, List, Optional, AsyncGenerator
 
-from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -21,9 +24,14 @@ from app.config import settings
 from app.database import get_db_pool, close_db_pool
 from app.graph import create_aura_graph
 from app.state import GraphState, UserProfileContext
+from app.nodes.rag import _vectorless_engine_instance
 
 logger = logging.getLogger("aura_main")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+# Directory setup for file uploads
+UPLOAD_DIR = Path("./uploads")
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 # Global Compiled Graph Application & Persistence Objects
 compiled_aura_graph = None
@@ -131,22 +139,18 @@ async def event_stream_generator(payload: ChatRequestPayload) -> AsyncGenerator[
     config = {"configurable": {"thread_id": payload.thread_id}}
 
     try:
-        # Stream events directly from compiled LangGraph instance
         async for event in compiled_aura_graph.astream_events(initial_state, config=config, version="v2"):
             kind = event.get("event")
             node_name = event.get("name", "")
 
-            # 1. Yield node transition events
             if kind == "on_chain_start" and node_name in ["pii_redaction", "supervisor_router", "general_agent", "rag_engine", "data_extractor"]:
                 yield f"data: {json.dumps({'type': 'node_start', 'node': node_name})}\n\n"
 
-            # 2. Yield individual token delta chunks from active LLMs
             elif kind == "on_chat_model_stream":
                 chunk = event.get("data", {}).get("chunk")
                 if chunk and hasattr(chunk, "content") and chunk.content:
                     yield f"data: {json.dumps({'type': 'token', 'content': str(chunk.content), 'node': node_name})}\n\n"
 
-        # 3. Final completion handshake signal
         yield f"data: {json.dumps({'type': 'done', 'thread_id': payload.thread_id})}\n\n"
 
     except Exception as exc:
@@ -159,9 +163,6 @@ async def event_stream_generator(payload: ChatRequestPayload) -> AsyncGenerator[
 # =====================================================================
 @app.get("/", tags=["System"])
 async def root_status():
-    """
-    Root status endpoint providing basic server metadata and documentation links.
-    """
     return {
         "service": getattr(settings, "APP_NAME", "Aura Gateway Core"),
         "status": "online",
@@ -172,14 +173,9 @@ async def root_status():
 
 @app.get("/health", tags=["System"])
 async def health_check():
-    """
-    Returns live gateway status and real-time health diagnostics
-    by testing active database ping and graph compilation state.
-    """
     db_healthy = False
     try:
         pool = await get_db_pool()
-        # psycopg_pool uses .connection() context manager
         async with pool.connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute("SELECT 1;")
@@ -202,10 +198,6 @@ async def health_check():
 
 @app.post("/api/v1/chat", response_model=ChatResponsePayload, tags=["Execution Engine"])
 async def execute_chat_query(payload: ChatRequestPayload):
-    """
-    Primary REST endpoint to process user queries through the LangGraph engine.
-    Applies PII redaction, intent routing, dynamic personas, and node execution.
-    """
     if not compiled_aura_graph:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -214,7 +206,6 @@ async def execute_chat_query(payload: ChatRequestPayload):
 
     logger.info(f"📩 [REQUEST] Processing query for thread '{payload.thread_id}' from user '{payload.user_id}'...")
 
-    # Build UserProfileContext
     user_context = UserProfileContext(
         user_id=payload.user_id,
         department=payload.department,
@@ -222,21 +213,17 @@ async def execute_chat_query(payload: ChatRequestPayload):
         preferred_language=payload.preferred_language,
     )
 
-    # Construct initial state input
     initial_state = {
         "messages": [HumanMessage(content=payload.message)],
         "user_context": user_context,
         "staged_action_payload": {"resolved_query": payload.message, "raw_text": payload.message},
     }
 
-    # Configuration thread scope
     config = {"configurable": {"thread_id": payload.thread_id}}
 
     try:
-        # Execute compiled graph workflow
         final_state = await compiled_aura_graph.ainvoke(initial_state, config=config)
 
-        # Extract latest message response from state
         response_text = "No response generated."
         if final_state.get("messages"):
             response_text = str(final_state["messages"][-1].content)
@@ -268,11 +255,55 @@ async def execute_chat_query(payload: ChatRequestPayload):
 
 @app.post("/api/v1/chat/stream", tags=["Execution Engine"])
 async def execute_chat_query_stream(payload: ChatRequestPayload):
-    """
-    Real-time Server-Sent Events (SSE) streaming endpoint.
-    Yields LLM tokens, node start events, and completion signals in real-time.
-    """
     return StreamingResponse(
         event_stream_generator(payload),
         media_type="text/event-stream"
     )
+
+
+@app.post("/api/v1/documents/upload", tags=["Ingestion Engine"])
+async def upload_document_endpoint(file: UploadFile = File(...)):
+    """
+    HTTP Document Ingestion Endpoint.
+    Accepts PDF, DOCX, XLSX, PPTX, and TXT files, stores them safely on disk,
+    computes a SHA-256 fingerprint, and pre-indexes document structure for Vectorless RAG.
+    """
+    allowed_extensions = {".pdf", ".docx", ".xlsx", ".pptx", ".txt"}
+    file_ext = Path(file.filename).suffix.lower()
+
+    if file_ext not in allowed_extensions:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported file format '{file_ext}'. Allowed formats: {list(allowed_extensions)}"
+        )
+
+    saved_file_path = UPLOAD_DIR / file.filename
+
+    try:
+        with saved_file_path.open("wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        file_hash = _vectorless_engine_instance.compute_file_hash(str(saved_file_path))
+
+        # Check existing cache or construct structure tree
+        root_tree = _vectorless_engine_instance.load_tree_from_cache(file_hash)
+        if not root_tree:
+            root_tree = _vectorless_engine_instance.parse_file_to_tree(str(saved_file_path))
+            await _vectorless_engine_instance.generate_node_summaries(root_tree)
+            _vectorless_engine_instance.save_tree_to_cache(file_hash, root_tree)
+
+        return {
+            "status": "success",
+            "filename": file.filename,
+            "file_path": str(saved_file_path),
+            "file_hash": file_hash,
+            "chapters_detected": len(root_tree.children),
+            "document_ref": str(saved_file_path)
+        }
+
+    except Exception as exc:
+        logger.error(f"❌ [UPLOAD ERROR] Document ingestion failed for '{file.filename}': {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to ingest document: {str(exc)}"
+        )
