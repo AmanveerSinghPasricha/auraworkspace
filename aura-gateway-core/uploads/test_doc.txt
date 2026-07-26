@@ -1,0 +1,1 @@
+Aura Gateway Core test document content for Vectorless RAG.

@@ -15,82 +15,85 @@ from psycopg_pool import AsyncConnectionPool
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.store.postgres import AsyncPostgresStore
 
-# Dynamically resolve .env path relative to database.py location
 ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
 if not ENV_PATH.exists():
     ENV_PATH = Path(__file__).resolve().parent.parent.parent / ".env"
 
-# Explicitly load environment variables from resolved .env file path
 load_dotenv(dotenv_path=ENV_PATH)
 
-# Configure module-level logger
 logger = logging.getLogger(__name__)
 
-# Retrieve Neon.tech Postgres connection string strictly from environment
 NEON_DATABASE_URL: str | None = os.getenv("DATABASE_URL")
 
 if not NEON_DATABASE_URL:
     raise RuntimeError(
-        "❌ [CRITICAL ERROR] DATABASE_URL environment variable is missing!\n"
+        "? [CRITICAL ERROR] DATABASE_URL environment variable is missing!\n"
         f"Attempted loading from: {ENV_PATH}\n"
         "Please ensure you have defined DATABASE_URL in your .env file."
     )
 
-print("🔌 [DATABASE INIT] Configuring serverless PostgreSQL connection pool...")
-
-# Configure asynchronous connection pool without auto-opening on sync import
+# Async Connection Pool optimized for Neon Serverless PgBouncer
 postgres_connection_pool: AsyncConnectionPool = AsyncConnectionPool(
     conninfo=NEON_DATABASE_URL,
+    min_size=1,
     max_size=20,
-    open=False,  # Open pool lazily inside async context
-    kwargs={"autocommit": True, "prepare_threshold": 0},
+    max_idle=300,             # Drop connections idle for >5 mins to align with Neon suspend
+    max_lifetime=1800,        # Periodically recycle connections every 30 minutes
+    reconnect_timeout=10,     # Time to wait during cold-start reconnections
+    open=False,
+    kwargs={
+        "autocommit": True,
+        "prepare_threshold": 0,  # Required for PgBouncer / Neon transaction pooling
+        "keepalives": 1,
+        "keepalives_idle": 30,
+        "keepalives_interval": 10,
+        "keepalives_count": 5,
+    },
 )
+
+
+async def get_db_pool() -> AsyncConnectionPool:
+    """Returns an active PostgreSQL async connection pool instance."""
+    if postgres_connection_pool.closed:
+        logger.info("? [DATABASE INIT] Opening serverless PostgreSQL connection pool...")
+        await postgres_connection_pool.open()
+        logger.info("? [DATABASE INIT] Connection pool opened successfully.")
+    return postgres_connection_pool
+
+
+async def close_db_pool():
+    """Safely closes active connection pools on shutdown."""
+    if not postgres_connection_pool.closed:
+        logger.info("?? [DATABASE CLOSE] Closing PostgreSQL connection pool...")
+        await postgres_connection_pool.close()
+        logger.info("? [DATABASE CLOSE] Connection pool closed.")
 
 
 @asynccontextmanager
 async def get_checkpointer() -> AsyncGenerator[AsyncPostgresSaver, None]:
-    """
-    Async context manager supplying the LangGraph AsyncPostgresSaver checkpointer.
-    Automatically sets up required checkpointer database tables on initial run.
-
-    Yields:
-        AsyncPostgresSaver: Active database checkpointer instance.
-    """
-    print("💾 [DATABASE CHECKPOINTER] Acquiring database connection for superstep checkpointer...")
+    """Yields a thread-safe AsyncPostgresSaver checkpointer context for LangGraph state management."""
+    logger.info("?? [DATABASE CHECKPOINTER] Acquiring database connection for checkpointer...")
     try:
-        if postgres_connection_pool.closed:
-            await postgres_connection_pool.open()
-            
-        async with postgres_connection_pool.connection() as async_db_connection:
-            async_checkpointer: AsyncPostgresSaver = AsyncPostgresSaver(async_db_connection)
-            print("⚙️ [DATABASE CHECKPOINTER] Executing checkpointer schema setup...")
+        pool = await get_db_pool()
+        async with pool.connection() as async_db_connection:
+            async_checkpointer = AsyncPostgresSaver(async_db_connection)
             await async_checkpointer.setup()
-            print("✅ [DATABASE CHECKPOINTER] Checkpointer ready for superstep serialization.")
             yield async_checkpointer
     except Exception as checkpointer_error:
-        print(f"❌ [DATABASE ERROR] Failed to yield checkpointer context: {str(checkpointer_error)}")
+        logger.error(f"? [DATABASE ERROR] Failed to yield checkpointer context: {checkpointer_error}")
         raise checkpointer_error
 
 
 @asynccontextmanager
 async def get_long_term_store() -> AsyncGenerator[AsyncPostgresStore, None]:
-    """
-    Async context manager supplying the LangGraph AsyncPostgresStore for persistent profiles.
-
-    Yields:
-        AsyncPostgresStore: Active long-term memory store instance.
-    """
-    print("🧠 [DATABASE STORE] Acquiring database connection for long-term profile memory...")
+    """Yields a thread-safe AsyncPostgresStore context for persistent long-term memory."""
+    logger.info("?? [DATABASE STORE] Acquiring database connection for long-term store...")
     try:
-        if postgres_connection_pool.closed:
-            await postgres_connection_pool.open()
-            
-        async with postgres_connection_pool.connection() as async_db_connection:
-            async_long_term_store: AsyncPostgresStore = AsyncPostgresStore(async_db_connection)
-            print("⚙️ [DATABASE STORE] Executing store schema setup...")
+        pool = await get_db_pool()
+        async with pool.connection() as async_db_connection:
+            async_long_term_store = AsyncPostgresStore(async_db_connection)
             await async_long_term_store.setup()
-            print("✅ [DATABASE STORE] Long-term memory store ready for profile queries.")
             yield async_long_term_store
     except Exception as store_error:
-        print(f"❌ [DATABASE ERROR] Failed to yield long-term store context: {str(store_error)}")
+        logger.error(f"? [DATABASE ERROR] Failed to yield long-term store context: {store_error}")
         raise store_error

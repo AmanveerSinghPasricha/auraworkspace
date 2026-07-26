@@ -1,0 +1,13 @@
+{
+  "node_id": "node_fc1c2318",
+  "title": "test_doc",
+  "level": 0,
+  "page_numbers": [
+    1
+  ],
+  "content_blocks": [
+    "Aura Gateway Core test document content for Vectorless RAG."
+  ],
+  "summary": "Section text content under test_doc",
+  "children": []
+}
