@@ -9,7 +9,7 @@ checkpointer initialization, and thread-scoped execution.
 import logging
 import json
 from contextlib import asynccontextmanager
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, AsyncGenerator
 
 from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -102,7 +102,60 @@ class ChatResponsePayload(BaseModel):
 
 
 # =====================================================================
-# 4. API ENDPOINTS
+# 4. SSE STREAMING GENERATOR
+# =====================================================================
+async def event_stream_generator(payload: ChatRequestPayload) -> AsyncGenerator[str, None]:
+    """
+    Intercepts LangGraph execution events and streams SSE tokens, node transitions,
+    and completion signals in real-time back to the client.
+    """
+    if not compiled_aura_graph:
+        yield f"data: {json.dumps({'type': 'error', 'message': 'Graph engine is uninitialized.'})}\n\n"
+        return
+
+    logger.info(f"🌊 [STREAM] Initiating event stream for thread '{payload.thread_id}'...")
+
+    user_context = UserProfileContext(
+        user_id=payload.user_id,
+        department=payload.department,
+        role_title=payload.role_title,
+        preferred_language=payload.preferred_language,
+    )
+
+    initial_state = {
+        "messages": [HumanMessage(content=payload.message)],
+        "user_context": user_context,
+        "staged_action_payload": {"resolved_query": payload.message, "raw_text": payload.message},
+    }
+
+    config = {"configurable": {"thread_id": payload.thread_id}}
+
+    try:
+        # Stream events directly from compiled LangGraph instance
+        async for event in compiled_aura_graph.astream_events(initial_state, config=config, version="v2"):
+            kind = event.get("event")
+            node_name = event.get("name", "")
+
+            # 1. Yield node transition events
+            if kind == "on_chain_start" and node_name in ["pii_redaction", "supervisor_router", "general_agent", "rag_engine", "data_extractor"]:
+                yield f"data: {json.dumps({'type': 'node_start', 'node': node_name})}\n\n"
+
+            # 2. Yield individual token delta chunks from active LLMs
+            elif kind == "on_chat_model_stream":
+                chunk = event.get("data", {}).get("chunk")
+                if chunk and hasattr(chunk, "content") and chunk.content:
+                    yield f"data: {json.dumps({'type': 'token', 'content': str(chunk.content), 'node': node_name})}\n\n"
+
+        # 3. Final completion handshake signal
+        yield f"data: {json.dumps({'type': 'done', 'thread_id': payload.thread_id})}\n\n"
+
+    except Exception as exc:
+        logger.error(f"❌ [STREAM ERROR] Execution streaming failed: {exc}")
+        yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
+
+
+# =====================================================================
+# 5. API ENDPOINTS
 # =====================================================================
 @app.get("/", tags=["System"])
 async def root_status():
@@ -211,3 +264,15 @@ async def execute_chat_query(payload: ChatRequestPayload):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Execution engine failure: {str(exc)}",
         )
+
+
+@app.post("/api/v1/chat/stream", tags=["Execution Engine"])
+async def execute_chat_query_stream(payload: ChatRequestPayload):
+    """
+    Real-time Server-Sent Events (SSE) streaming endpoint.
+    Yields LLM tokens, node start events, and completion signals in real-time.
+    """
+    return StreamingResponse(
+        event_stream_generator(payload),
+        media_type="text/event-stream"
+    )

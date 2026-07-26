@@ -13,17 +13,18 @@ async def test_root_endpoint():
     assert data["status"] == "online"
     assert "docs" in data
 
+
 @pytest.mark.asyncio
 async def test_health_check_endpoint():
     """Verify GET /health checks database connection and graph compilation."""
-    # Using LifespanManager or entering app context ensures startup events run
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get("/health")
 
-    assert response.status_code in (200, 503) # Validates response structure
+    assert response.status_code in (200, 503)  # Validates response structure
     data = response.json()
     assert "status" in data
     assert "diagnostics" in data
+
 
 @pytest.mark.asyncio
 async def test_chat_execution_happy_path():
@@ -40,12 +41,13 @@ async def test_chat_execution_happy_path():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post("/api/v1/chat", json=payload)
 
-    # 200 OK when DB is connected, or 503 if test DB pool is uninitialized
+    # 200 OK when DB/graph is connected, or 503 if uninitialized
     assert response.status_code in (200, 503)
     data = response.json()
     if response.status_code == 200:
         assert data["thread_id"] == "api_test_thread_001"
         assert "response" in data
+
 
 @pytest.mark.asyncio
 async def test_chat_execution_edge_case_missing_required_field():
@@ -60,3 +62,22 @@ async def test_chat_execution_edge_case_missing_required_field():
         response = await client.post("/api/v1/chat", json=invalid_payload)
 
     assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_endpoint_happy_path():
+    """Verify POST /api/v1/chat/stream returns 200 OK and streams event data."""
+    payload = {
+        "user_id": "pytest_stream_user",
+        "thread_id": "api_stream_thread_001",
+        "message": "Hello, explain AI agent state graphs briefly.",
+        "department": "Engineering"
+    }
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/v1/chat/stream", json=payload)
+
+    assert response.status_code in (200, 503)
+    if response.status_code == 200:
+        assert "text/event-stream" in response.headers.get("content-type", "")
+        assert "data:" in response.text
