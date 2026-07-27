@@ -28,7 +28,7 @@ psycopg[binary]>=3.1.18
 psycopg-pool>=3.2.1
 
 # Document Layout Parser & Vectorless RAG Engine
-docling-core>=2.0.0
+docling>=2.0.0
 
 # Model Provider APIs & Utility Libraries
 google-generativeai>=0.7.0
