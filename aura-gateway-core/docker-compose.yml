@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+  # ----------------------------------------------------
+  # 1. Aura Gateway Core FastAPI Service
+  # ----------------------------------------------------
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: aura_gateway_core
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8000
+    volumes:
+      # Mount persistent local storage for file uploads and Vectorless RAG trees
+      - ./uploads:/app/uploads
+      - ./.vectorless_cache:/app/.vectorless_cache
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ----------------------------------------------------
+  # 2. Local PostgreSQL Database Service (Fallback/Development)
+  # ----------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: aura_postgres_db
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-aura_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aura_password}
+      POSTGRES_DB: ${POSTGRES_DB:-aura_db}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-aura_user} -d ${POSTGRES_DB:-aura_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

@@ -1,0 +1,23 @@
+# Virtual environments
+auraenv/
+.venv/
+venv/
+ENV/
+
+# Python byte-code & caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.vectorless_cache/
+
+# Local data & uploads
+uploads/
+*.log
+
+# Git & IDE files
+.git/
+.gitignore
+.vscode/
+.idea/
+README.md
