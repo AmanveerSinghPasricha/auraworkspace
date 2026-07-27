@@ -25,18 +25,19 @@ FROM python:3.13-slim AS runner
 
 WORKDIR /app
 
-# Install minimal runtime libraries required for PostgreSQL driver
+# Install minimal runtime libraries required for PostgreSQL driver & document processing
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq5 \
     curl \
+    poppler-utils \
+    tesseract-ocr \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy pre-compiled dependencies from builder
 COPY --from=builder /build/pip_packages /usr/local
 
-# Copy application source code and environment configuration
+# Copy application source code
 COPY app/ /app/app
-COPY .env /app/.env
 
 # Create persistent directories for uploads and vectorless cache
 RUN mkdir -p /app/uploads /app/.vectorless_cache
