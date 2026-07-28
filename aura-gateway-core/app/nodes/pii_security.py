@@ -9,6 +9,7 @@ import logging
 from typing import Dict, Any, List
 from langchain_core.messages import HumanMessage, BaseMessage, RemoveMessage
 from presidio_analyzer import AnalyzerEngine
+from presidio_analyzer.nlp_engine import NlpEngineProvider
 from presidio_anonymizer import AnonymizerEngine
 
 from app.state import GraphState
@@ -16,8 +17,16 @@ from app.state import GraphState
 logger = logging.getLogger("pii_guardrail")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-# Initialize Presidio Engines once at startup
-analyzer_engine = AnalyzerEngine()
+# Explicitly configure Presidio to use the lightweight spaCy model (en_core_web_sm)
+provider = NlpEngineProvider(nlp_configuration={
+    "nlp_engine_name": "spacy",
+    "models": [{"lang_code": "en", "model_name": "en_core_web_sm"}],
+})
+
+nlp_engine = provider.create_engine()
+
+# Initialize Presidio Engines once at startup with small model engine
+analyzer_engine = AnalyzerEngine(nlp_engine=nlp_engine)
 anonymizer_engine = AnonymizerEngine()
 
 

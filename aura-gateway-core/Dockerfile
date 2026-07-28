@@ -36,6 +36,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy pre-compiled dependencies from builder
 COPY --from=builder /build/pip_packages /usr/local
 
+# Pre-download the lightweight spaCy model required for Presidio PII redaction
+RUN python -m spacy download en_core_web_sm
+
 # Copy application source code
 COPY app/ /app/app
 
