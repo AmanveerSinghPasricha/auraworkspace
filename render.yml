@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: aura-gateway-core
+    env: docker
+    dockerfilePath: ./aura-gateway-core/Dockerfile
+    dockerContext: ./aura-gateway-core
+    region: singapore # or oregon, frankfurt, etc.
+    plan: free
+    healthCheckPath: /docs
+    envVars:
+      - key: ALGORITHM
+        value: "HS256"
+      - key: ACCESS_TOKEN_EXPIRE_MINUTES
+        value: "30"
+      - key: SECRET_KEY
+        generateValue: true
+      # DATABASE_URL will be added in Render Dashboard
