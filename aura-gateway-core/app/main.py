@@ -22,9 +22,7 @@ from langchain_core.messages import HumanMessage
 
 from app.config import settings
 from app.database import get_db_pool, close_db_pool
-from app.graph import create_aura_graph
 from app.state import GraphState, UserProfileContext
-from app.nodes.rag import _vectorless_engine_instance
 
 logger = logging.getLogger("aura_main")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -54,13 +52,14 @@ async def lifespan(app: FastAPI):
         pool = await get_db_pool()
         logger.info("✅ [DATABASE] Database connection pool established successfully.")
 
-        # Compile the master state graph
+        # Lazy import graph builder to defer heavy ML package loading until after DB init
+        from app.graph import create_aura_graph
         compiled_aura_graph = create_aura_graph(checkpointer=None, store=None)
         logger.info("✅ [GRAPH LOADED] Master LangGraph engine ready for requests.")
 
     except Exception as exc:
         logger.error(f"❌ [STARTUP ERROR] Failed to initialize resources: {exc}")
-        # Compile fallback graph for local execution/testing
+        from app.graph import create_aura_graph
         compiled_aura_graph = create_aura_graph()
 
     yield
@@ -113,10 +112,6 @@ class ChatResponsePayload(BaseModel):
 # 4. SSE STREAMING GENERATOR
 # =====================================================================
 async def event_stream_generator(payload: ChatRequestPayload) -> AsyncGenerator[str, None]:
-    """
-    Intercepts LangGraph execution events and streams SSE tokens, node transitions,
-    and completion signals in real-time back to the client.
-    """
     if not compiled_aura_graph:
         yield f"data: {json.dumps({'type': 'error', 'message': 'Graph engine is uninitialized.'})}\n\n"
         return
@@ -263,11 +258,9 @@ async def execute_chat_query_stream(payload: ChatRequestPayload):
 
 @app.post("/api/v1/documents/upload", tags=["Ingestion Engine"])
 async def upload_document_endpoint(file: UploadFile = File(...)):
-    """
-    HTTP Document Ingestion Endpoint.
-    Accepts PDF, DOCX, XLSX, PPTX, and TXT files, stores them safely on disk,
-    computes a SHA-256 fingerprint, and pre-indexes document structure for Vectorless RAG.
-    """
+    # Lazy import vectorless engine on demand
+    from app.nodes.rag import _vectorless_engine_instance
+
     allowed_extensions = {".pdf", ".docx", ".xlsx", ".pptx", ".txt"}
     file_ext = Path(file.filename).suffix.lower()
 
@@ -285,7 +278,6 @@ async def upload_document_endpoint(file: UploadFile = File(...)):
 
         file_hash = _vectorless_engine_instance.compute_file_hash(str(saved_file_path))
 
-        # Check existing cache or construct structure tree
         root_tree = _vectorless_engine_instance.load_tree_from_cache(file_hash)
         if not root_tree:
             root_tree = _vectorless_engine_instance.parse_file_to_tree(str(saved_file_path))
