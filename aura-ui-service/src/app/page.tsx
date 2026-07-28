@@ -3,6 +3,8 @@
 import { useEffect } from 'react';
 import { useAppStore } from '../store/useAppStore';
 import { api } from '../hooks/useApi';
+import { DocumentUpload } from '../components/DocumentUpload';
+import { AgentChat } from '../components/AgentChat';
 
 export default function Home() {
   const { health, setHealth } = useAppStore();
@@ -22,14 +24,13 @@ export default function Home() {
 
   return (
     <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col font-sans">
-      {/* Top Navigation Bar */}
+      {/* Header */}
       <header className="border-b border-slate-800 bg-slate-950 px-6 py-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
           <div className="h-4 w-4 bg-indigo-500 rounded-sm animate-pulse" />
           <h1 className="text-lg font-bold tracking-wide">AURA WORKSPACE</h1>
         </div>
 
-        {/* Gateway Connection Indicator */}
         <div className="flex items-center gap-2 bg-slate-900 border border-slate-800 px-3 py-1.5 rounded-full text-xs">
           <span
             className={`h-2.5 w-2.5 rounded-full ${
@@ -46,16 +47,14 @@ export default function Home() {
         </div>
       </header>
 
-      {/* Main Workspace Shell */}
+      {/* Workspace Grid */}
       <main className="flex-1 p-6 max-w-7xl w-full mx-auto grid grid-cols-1 md:grid-cols-3 gap-6">
-        <section className="bg-slate-950/50 border border-slate-800 rounded-xl p-5 flex flex-col items-center justify-center text-slate-400 text-sm">
-          📁 Document Ingestion Panel
-          <span className="text-xs text-slate-500 mt-1">(Coming in Phase 2)</span>
+        <section className="md:col-span-1">
+          <DocumentUpload />
         </section>
 
-        <section className="md:col-span-2 bg-slate-950/50 border border-slate-800 rounded-xl p-5 flex flex-col items-center justify-center text-slate-400 text-sm">
-          💬 Agent Chat Workspace
-          <span className="text-xs text-slate-500 mt-1">(Coming in Phase 2)</span>
+        <section className="md:col-span-2">
+          <AgentChat />
         </section>
       </main>
     </div>
