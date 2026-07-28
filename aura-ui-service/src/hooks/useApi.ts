@@ -29,19 +29,32 @@ export async function apiRequest<T>(
 
 export const api = {
   checkHealth: () => apiRequest<SystemHealth>('/health'),
-  
-  sendMessage: (prompt: string) =>
+
+  // FIXED: Changed payload key from 'prompt' to 'message' to match FastAPI schema
+  sendMessage: (message: string) =>
     apiRequest<Message>('/api/v1/chat', {
       method: 'POST',
-      body: JSON.stringify({ prompt }),
+      body: JSON.stringify({ message }),
     }),
 
-  uploadDocument: (formData: FormData) =>
-    fetch(`${API_BASE_URL}/api/v1/documents/upload`, {
+  // FIXED: Added auth bearer token and detail error parsing for uploads
+  uploadDocument: async (formData: FormData): Promise<DocumentStatus> => {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('access_token') : null;
+
+    const response = await fetch(`${API_BASE_URL}/api/v1/documents/upload`, {
       method: 'POST',
+      headers: {
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        // Note: Do NOT set 'Content-Type' manually here so the browser sets multipart boundaries automatically
+      },
       body: formData,
-    }).then((res) => {
-      if (!res.ok) throw new Error('Document upload failed');
-      return res.json() as Promise<DocumentStatus>;
-    }),
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `Upload failed with status ${response.status}`);
+    }
+
+    return response.json();
+  },
 };
