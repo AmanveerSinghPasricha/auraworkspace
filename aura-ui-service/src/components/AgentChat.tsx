@@ -7,7 +7,7 @@ import { api } from '../hooks/useApi';
 export function AgentChat() {
   const [input, setInput] = useState('');
   const [isSending, setIsSending] = useState(false);
-  const { messages, addMessage } = useAppStore();
+  const { messages, addMessage, activeDocument } = useAppStore();
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -32,7 +32,12 @@ export function AgentChat() {
     setIsSending(true);
 
     try {
-      const response = await api.sendMessage(userText);
+      // Pass user query along with active document context (if present)
+      const response = await api.sendMessage(userText, activeDocument ? {
+        file_hash: activeDocument.file_hash,
+        document_ref: activeDocument.document_ref,
+        filename: activeDocument.filename,
+      } : undefined);
 
       // Check response.response first (matches FastAPI gateway contract)
       const messageContent =
@@ -105,13 +110,25 @@ export function AgentChat() {
         <div ref={chatEndRef} />
       </div>
 
+      {/* Active Document Context Banner */}
+      {activeDocument && (
+        <div className="mb-3 px-3 py-1.5 bg-indigo-950/40 border border-indigo-500/30 rounded-lg flex items-center gap-2 text-[11px] text-indigo-300">
+          <span className="w-2 h-2 rounded-full bg-indigo-400 animate-pulse"></span>
+          <span>RAG Active: <strong>{activeDocument.filename}</strong> ({activeDocument.chapters_detected} chapters)</span>
+        </div>
+      )}
+
       {/* Input Box */}
       <form onSubmit={handleSend} className="flex gap-2">
         <input
           type="text"
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder="Ask AURA agent or request document analysis..."
+          placeholder={
+            activeDocument 
+              ? `Ask questions about ${activeDocument.filename}...` 
+              : "Ask AURA agent or request document analysis..."
+          }
           className="flex-1 bg-slate-900 border border-slate-800 rounded-lg px-4 py-2.5 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-indigo-500 transition-colors"
         />
         <button
