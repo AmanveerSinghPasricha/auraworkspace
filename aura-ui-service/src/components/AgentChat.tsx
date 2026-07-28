@@ -33,10 +33,15 @@ export function AgentChat() {
 
     try {
       const response = await api.sendMessage(userText);
+
+      // Check response.response first (matches FastAPI gateway contract)
+      const messageContent =
+        response.response || response.content || response.message || 'Response received from AURA agent.';
+
       addMessage({
         id: response.id || (Date.now() + 1).toString(),
         sender: 'assistant',
-        content: response.content || 'Response received from AURA agent.',
+        content: messageContent,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         toolCalls: response.toolCalls,
       });
