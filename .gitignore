@@ -1,4 +1,4 @@
-# Python Virtual Environments
+# Python Virtual Environments & Caches
 __pycache__/
 *.py[cod]
 *$py.class
@@ -9,6 +9,12 @@ venv/
 auraenv/
 *env/
 *.env
+
+# Local Storage, Uploads & Vectorless RAG Cache
+uploads/
+uploads/*
+.vectorless_cache/
+.vectorless_cache/*
 
 # Node / Next.js
 node_modules/

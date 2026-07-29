@@ -12,6 +12,7 @@ import uuid
 import logging
 import hashlib
 import asyncio
+import pypdf
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 from pydantic import BaseModel, Field
@@ -31,6 +32,10 @@ from app.state import GraphState
 
 logger = logging.getLogger("vectorless_rag")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+# Force C++ memory allocators to trim unused heap memory back to OS
+os.environ["MALLOC_TRIM_THRESHOLD_"] = "65536"
+os.environ["OMP_NUM_THREADS"] = "2"
 
 # Wrap LiteLLM with Instructor for Gateway Structured Output calls
 instructor_client = instructor.from_litellm(acompletion)
@@ -79,16 +84,9 @@ class VectorlessEngine:
                 hasher.update(chunk)
         return hasher.hexdigest()
 
-    def parse_file_to_tree(self, file_path: str) -> TreeNode:
-        """
-        Converts multi-format files (.pdf, .docx, .xlsx, .pptx) using Docling
-        into a clean, nested section hierarchy without breaking tables or sentences.
-        """
-        logger.info(f"📖 [PARSING] Processing file with Docling: {file_path}")
-        conversion_result = self.converter.convert(file_path)
-        doc = conversion_result.document
-
-        root = TreeNode(title=doc.name or Path(file_path).name, level=0)
+    def _parse_single_doc_to_tree(self, doc, root_title: str) -> TreeNode:
+        """Internal helper to convert a Docling Document object into a TreeNode structure."""
+        root = TreeNode(title=root_title, level=0)
         stack: List[TreeNode] = [root]
 
         for item, level in doc.iterate_items():
@@ -126,6 +124,59 @@ class VectorlessEngine:
                         target_node.page_numbers.append(page_no)
 
         return root
+
+    def parse_file_to_tree(self, file_path: str, batch_size: int = 30) -> TreeNode:
+        """
+        Converts multi-format files (.pdf, .docx, .xlsx, .pptx) using Docling.
+        Uses page-range batching for large PDFs to retain full OCR and table accuracy
+        without triggering C++ std::bad_alloc memory overflow.
+        """
+        logger.info(f"📖 [PARSING] Processing file with Docling: {file_path}")
+        root_title = Path(file_path).name
+
+        total_pages = 0
+        if file_path.lower().endswith(".pdf"):
+            try:
+                reader = pypdf.PdfReader(file_path)
+                total_pages = len(reader.pages)
+            except Exception as e:
+                logger.warning(f"Failed to inspect PDF page count via PyPDF: {e}")
+
+        # Batch process large PDFs if page count exceeds batch size
+        if total_pages > batch_size:
+            logger.info(f"📄 [PARSING BATCHED] Document has {total_pages} pages. Processing in batches of {batch_size} pages...")
+            
+            accumulated_children: List[TreeNode] = []
+            
+            for start_page in range(1, total_pages + 1, batch_size):
+                end_page = min(start_page + batch_size - 1, total_pages)
+                page_range = list(range(start_page, end_page + 1))
+                
+                logger.info(f"📑 Processing pages {start_page} to {end_page} of {total_pages}...")
+                try:
+                    conv_res = self.converter.convert(file_path, page_numbers=page_range)
+                    if conv_res and conv_res.document:
+                        batch_root = self._parse_single_doc_to_tree(conv_res.document, root_title)
+                        accumulated_children.extend(batch_root.children)
+                        # Append unattached top-level content blocks if any
+                        if batch_root.content_blocks:
+                            accumulated_children.append(
+                                TreeNode(
+                                    title=f"Page Group {start_page}-{end_page}",
+                                    level=1,
+                                    page_numbers=page_range,
+                                    content_blocks=batch_root.content_blocks
+                                )
+                            )
+                except Exception as batch_err:
+                    logger.error(f"❌ Failed to parse page range {start_page}-{end_page}: {batch_err}")
+
+            final_root = TreeNode(title=root_title, level=0, children=accumulated_children)
+            return final_root
+
+        # Standard single-pass conversion for smaller documents
+        conversion_result = self.converter.convert(file_path)
+        return self._parse_single_doc_to_tree(conversion_result.document, root_title)
 
     async def generate_node_summaries(self, node: TreeNode):
         """Generates fast 1-2 sentence abstracts for each section asynchronously via Gateway with Rate-Limit Failover."""

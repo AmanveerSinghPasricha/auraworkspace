@@ -26,6 +26,10 @@ from app.config import settings
 from app.database import get_db_pool, close_db_pool
 from app.state import GraphState, UserProfileContext
 
+# Memory safety settings for native C++ allocators
+os.environ["MALLOC_TRIM_THRESHOLD_"] = "65536"
+os.environ["OMP_NUM_THREADS"] = "2"
+
 logger = logging.getLogger("aura_main")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
