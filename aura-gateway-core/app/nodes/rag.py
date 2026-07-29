@@ -18,7 +18,9 @@ from typing import List, Dict, Any, Optional, Tuple
 from pydantic import BaseModel, Field
 
 # Layout Parsing Engine
-from docling.document_converter import DocumentConverter
+from docling.document_converter import DocumentConverter, PdfFormatOption
+from docling.datamodel.pipeline_options import PdfPipelineOptions
+from docling.datamodel.base_models import InputFormat
 from docling_core.types.doc import DocItemLabel
 
 # Gateway Interoperability SDK (LiteLLM + Instructor)
@@ -72,7 +74,15 @@ class IntentAndRoutingOutput(BaseModel):
 # =====================================================================
 class VectorlessEngine:
     def __init__(self, cache_dir: str = ".vectorless_cache"):
-        self.converter = DocumentConverter()
+        # Configure lightweight options to keep RAM low during batch execution
+        pipeline_options = PdfPipelineOptions()
+        pipeline_options.generate_page_images = False
+        
+        self.converter = DocumentConverter(
+            format_options={
+                InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
+            }
+        )
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -127,9 +137,8 @@ class VectorlessEngine:
 
     def parse_file_to_tree(self, file_path: str, batch_size: int = 30) -> TreeNode:
         """
-        Converts multi-format files (.pdf, .docx, .xlsx, .pptx) using Docling.
-        Uses page-range batching for large PDFs to retain full OCR and table accuracy
-        without triggering C++ std::bad_alloc memory overflow.
+        Converts multi-format files using Docling.
+        Uses page-range batching via temporary sub-PDFs for large files to avoid bad_alloc errors.
         """
         logger.info(f"📖 [PARSING] Processing file with Docling: {file_path}")
         root_title = Path(file_path).name
@@ -142,39 +151,58 @@ class VectorlessEngine:
             except Exception as e:
                 logger.warning(f"Failed to inspect PDF page count via PyPDF: {e}")
 
-        # Batch process large PDFs if page count exceeds batch size
+        # Batch process large PDFs
         if total_pages > batch_size:
             logger.info(f"📄 [PARSING BATCHED] Document has {total_pages} pages. Processing in batches of {batch_size} pages...")
             
             accumulated_children: List[TreeNode] = []
+            reader = pypdf.PdfReader(file_path)
+            temp_dir = Path("./uploads/_temp_chunks")
+            temp_dir.mkdir(parents=True, exist_ok=True)
             
             for start_page in range(1, total_pages + 1, batch_size):
                 end_page = min(start_page + batch_size - 1, total_pages)
-                page_range = list(range(start_page, end_page + 1))
                 
                 logger.info(f"📑 Processing pages {start_page} to {end_page} of {total_pages}...")
+                
+                # Extract chunk to temporary PDF file
+                writer = pypdf.PdfWriter()
+                for p_idx in range(start_page - 1, end_page):
+                    writer.add_page(reader.pages[p_idx])
+                
+                chunk_path = temp_dir / f"chunk_{start_page}_{end_page}.pdf"
+                with open(chunk_path, "wb") as f_out:
+                    writer.write(f_out)
+
                 try:
-                    conv_res = self.converter.convert(file_path, page_numbers=page_range)
+                    conv_res = self.converter.convert(str(chunk_path))
                     if conv_res and conv_res.document:
                         batch_root = self._parse_single_doc_to_tree(conv_res.document, root_title)
+                        
+                        # Adjust page numbers to match original document offset
+                        for child in batch_root.children:
+                            child.page_numbers = [p + start_page - 1 for p in child.page_numbers]
+                        
                         accumulated_children.extend(batch_root.children)
-                        # Append unattached top-level content blocks if any
                         if batch_root.content_blocks:
                             accumulated_children.append(
                                 TreeNode(
                                     title=f"Page Group {start_page}-{end_page}",
                                     level=1,
-                                    page_numbers=page_range,
+                                    page_numbers=list(range(start_page, end_page + 1)),
                                     content_blocks=batch_root.content_blocks
                                 )
                             )
                 except Exception as batch_err:
                     logger.error(f"❌ Failed to parse page range {start_page}-{end_page}: {batch_err}")
+                finally:
+                    if chunk_path.exists():
+                        chunk_path.unlink()  # Cleanup temp chunk file
 
             final_root = TreeNode(title=root_title, level=0, children=accumulated_children)
             return final_root
 
-        # Standard single-pass conversion for smaller documents
+        # Standard conversion for small documents
         conversion_result = self.converter.convert(file_path)
         return self._parse_single_doc_to_tree(conversion_result.document, root_title)
 
