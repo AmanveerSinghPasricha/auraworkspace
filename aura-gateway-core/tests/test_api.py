@@ -2,6 +2,7 @@ import pytest
 from httpx import AsyncClient, ASGITransport
 from app.main import app
 
+
 @pytest.mark.asyncio
 async def test_root_endpoint():
     """Verify GET / returns server status and documentation links."""
@@ -84,7 +85,7 @@ async def test_chat_stream_endpoint_happy_path():
 
 @pytest.mark.asyncio
 async def test_document_upload_endpoint():
-    """Verify POST /api/v1/documents/upload processes document files and returns ingestion details."""
+    """Verify POST /api/v1/documents/upload queues document for background processing."""
     file_content = b"Aura Gateway Core test document content for Vectorless RAG."
     files = {"file": ("test_doc.txt", file_content, "text/plain")}
 
@@ -93,6 +94,24 @@ async def test_document_upload_endpoint():
 
     assert response.status_code == 200
     data = response.json()
-    assert data["status"] == "success"
-    assert "file_hash" in data
-    assert "document_ref" in data
+    assert data["status"] == "queued"
+    assert "job_id" in data
+    assert data["filename"] == "test_doc.txt"
+
+
+@pytest.mark.asyncio
+async def test_document_status_polling_endpoint():
+    """Verify GET /api/v1/documents/status/{job_id} allows checking job state."""
+    file_content = b"Aura Gateway Core polling test content."
+    files = {"file": ("poll_test_doc.txt", file_content, "text/plain")}
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        upload_res = await client.post("/api/v1/documents/upload", files=files)
+        job_id = upload_res.json()["job_id"]
+
+        status_res = await client.get(f"/api/v1/documents/status/{job_id}")
+
+    assert status_res.status_code == 200
+    status_data = status_res.json()
+    assert "status" in status_data
+    assert status_data["job_id"] == job_id
