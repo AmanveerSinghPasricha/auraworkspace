@@ -3,18 +3,20 @@ Aura Gateway Core - Primary FastAPI Gateway Server
 ==================================================
 Exposes REST, Streaming, and Ingestion API endpoints for the multi-agent state graph.
 Handles lifecycle events for Neon Postgres database connection pooling,
-checkpointer initialization, and thread-scoped execution.
+checkpointer initialization, thread-scoped execution, and async document processing.
 """
 
 import os
 import shutil
 import logging
 import json
+import uuid
+import uvicorn
 from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Dict, Any, List, Optional, AsyncGenerator
 
-from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File
+from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -31,8 +33,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 UPLOAD_DIR = Path("./uploads")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-# Global Compiled Graph Application & Persistence Objects
+# Global Compiled Graph Application & Background Job Store
 compiled_aura_graph = None
+ingestion_jobs: Dict[str, Dict[str, Any]] = {}
 
 
 # =====================================================================
@@ -98,6 +101,8 @@ class ChatRequestPayload(BaseModel):
     department: Optional[str] = Field(default="Engineering", description="User department context")
     role_title: Optional[str] = Field(default="Machine Learning Engineer", description="User professional title")
     preferred_language: Optional[str] = Field(default="English", description="Target response language")
+    file_hash: Optional[str] = Field(default=None, description="Active RAG document hash")
+    document_ref: Optional[str] = Field(default=None, description="Active RAG document path or reference")
 
 
 class ChatResponsePayload(BaseModel):
@@ -109,7 +114,40 @@ class ChatResponsePayload(BaseModel):
 
 
 # =====================================================================
-# 4. SSE STREAMING GENERATOR
+# 4. ASYNCHRONOUS INGESTION WORKER
+# =====================================================================
+async def process_document_background_task(job_id: str, file_path: Path, filename: str):
+    """Processes document parsing and node summary generation asynchronously to prevent HTTP timeouts."""
+    from app.nodes.rag import _vectorless_engine_instance
+
+    try:
+        ingestion_jobs[job_id]["status"] = "processing"
+        file_hash = _vectorless_engine_instance.compute_file_hash(str(file_path))
+
+        root_tree = _vectorless_engine_instance.load_tree_from_cache(file_hash)
+        if not root_tree:
+            root_tree = _vectorless_engine_instance.parse_file_to_tree(str(file_path))
+            await _vectorless_engine_instance.generate_node_summaries(root_tree)
+            _vectorless_engine_instance.save_tree_to_cache(file_hash, root_tree)
+
+        ingestion_jobs[job_id]["status"] = "completed"
+        ingestion_jobs[job_id]["result"] = {
+            "filename": filename,
+            "file_path": str(file_path),
+            "file_hash": file_hash,
+            "chapters_detected": len(root_tree.children) if root_tree else 0,
+            "document_ref": str(file_path)
+        }
+        logger.info(f"✅ [ASYNC INGESTION] Document '{filename}' successfully indexed.")
+
+    except Exception as exc:
+        logger.error(f"❌ [ASYNC INGESTION ERROR] Failed for '{filename}': {exc}")
+        ingestion_jobs[job_id]["status"] = "failed"
+        ingestion_jobs[job_id]["error"] = str(exc)
+
+
+# =====================================================================
+# 5. SSE STREAMING GENERATOR
 # =====================================================================
 async def event_stream_generator(payload: ChatRequestPayload) -> AsyncGenerator[str, None]:
     if not compiled_aura_graph:
@@ -128,7 +166,12 @@ async def event_stream_generator(payload: ChatRequestPayload) -> AsyncGenerator[
     initial_state = {
         "messages": [HumanMessage(content=payload.message)],
         "user_context": user_context,
-        "staged_action_payload": {"resolved_query": payload.message, "raw_text": payload.message},
+        "staged_action_payload": {
+            "resolved_query": payload.message, 
+            "raw_text": payload.message,
+            "file_hash": payload.file_hash,
+            "document_ref": payload.document_ref,
+        },
     }
 
     config = {"configurable": {"thread_id": payload.thread_id}}
@@ -154,7 +197,7 @@ async def event_stream_generator(payload: ChatRequestPayload) -> AsyncGenerator[
 
 
 # =====================================================================
-# 5. API ENDPOINTS
+# 6. API ENDPOINTS
 # =====================================================================
 @app.get("/", tags=["System"])
 async def root_status():
@@ -211,7 +254,12 @@ async def execute_chat_query(payload: ChatRequestPayload):
     initial_state = {
         "messages": [HumanMessage(content=payload.message)],
         "user_context": user_context,
-        "staged_action_payload": {"resolved_query": payload.message, "raw_text": payload.message},
+        "staged_action_payload": {
+            "resolved_query": payload.message, 
+            "raw_text": payload.message,
+            "file_hash": payload.file_hash,
+            "document_ref": payload.document_ref,
+        },
     }
 
     config = {"configurable": {"thread_id": payload.thread_id}}
@@ -257,10 +305,10 @@ async def execute_chat_query_stream(payload: ChatRequestPayload):
 
 
 @app.post("/api/v1/documents/upload", tags=["Ingestion Engine"])
-async def upload_document_endpoint(file: UploadFile = File(...)):
-    # Lazy import vectorless engine on demand
-    from app.nodes.rag import _vectorless_engine_instance
-
+async def upload_document_endpoint(
+    background_tasks: BackgroundTasks, 
+    file: UploadFile = File(...)
+):
     allowed_extensions = {".pdf", ".docx", ".xlsx", ".pptx", ".txt"}
     file_ext = Path(file.filename).suffix.lower()
 
@@ -271,31 +319,55 @@ async def upload_document_endpoint(file: UploadFile = File(...)):
         )
 
     saved_file_path = UPLOAD_DIR / file.filename
+    job_id = str(uuid.uuid4())
 
     try:
         with saved_file_path.open("wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
-        file_hash = _vectorless_engine_instance.compute_file_hash(str(saved_file_path))
+        ingestion_jobs[job_id] = {
+            "status": "queued",
+            "filename": file.filename,
+            "job_id": job_id
+        }
 
-        root_tree = _vectorless_engine_instance.load_tree_from_cache(file_hash)
-        if not root_tree:
-            root_tree = _vectorless_engine_instance.parse_file_to_tree(str(saved_file_path))
-            await _vectorless_engine_instance.generate_node_summaries(root_tree)
-            _vectorless_engine_instance.save_tree_to_cache(file_hash, root_tree)
+        # Dispatch heavy indexing to background task
+        background_tasks.add_task(
+            process_document_background_task, 
+            job_id, 
+            saved_file_path, 
+            file.filename
+        )
 
         return {
-            "status": "success",
+            "status": "queued",
+            "job_id": job_id,
             "filename": file.filename,
-            "file_path": str(saved_file_path),
-            "file_hash": file_hash,
-            "chapters_detected": len(root_tree.children),
-            "document_ref": str(saved_file_path)
+            "message": "Document upload received. Background ingestion initialized."
         }
 
     except Exception as exc:
-        logger.error(f"❌ [UPLOAD ERROR] Document ingestion failed for '{file.filename}': {exc}")
+        logger.error(f"❌ [UPLOAD ERROR] Failed to save file '{file.filename}': {exc}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to ingest document: {str(exc)}"
+            detail=f"Failed to save document: {str(exc)}"
         )
+
+
+@app.get("/api/v1/documents/status/{job_id}", tags=["Ingestion Engine"])
+async def get_ingestion_job_status(job_id: str):
+    """Allows frontend to poll the background document ingestion status."""
+    if job_id not in ingestion_jobs:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Ingestion job ID not found."
+        )
+    return ingestion_jobs[job_id]
+
+
+# =====================================================================
+# 7. DIRECT SERVER ENTRYPOINT (PROD / RENDER BINDING)
+# =====================================================================
+if __name__ == "__main__":
+    server_port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("app.main:app", host="0.0.0.0", port=server_port, reload=False)
