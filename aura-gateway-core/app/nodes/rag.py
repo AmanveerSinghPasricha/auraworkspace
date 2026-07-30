@@ -7,6 +7,7 @@ and immutable filesystem caching. Integrated with LangGraph state.
 """
 
 import os
+import sys
 import json
 import uuid
 import logging
@@ -17,10 +18,14 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 from pydantic import BaseModel, Field
 
-# Layout Parsing Engine
+# Raise recursion limit for ultra-deep 400+ page document structures
+sys.setrecursionlimit(5000)
+
+# Layout Parsing Engine & PDFium Backend
 from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling.datamodel.pipeline_options import PdfPipelineOptions
 from docling.datamodel.base_models import InputFormat
+from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
 from docling_core.types.doc import DocItemLabel
 
 # Gateway Interoperability SDK (LiteLLM + Instructor)
@@ -56,11 +61,18 @@ class TreeNode(BaseModel):
     children: List["TreeNode"] = Field(default_factory=list)
 
     def full_content(self) -> str:
-        """Recursively extracts unchunked text and tables for this node and children."""
-        text = "\n".join(self.content_blocks)
-        for child in self.children:
-            text += f"\n\n{child.full_content()}"
-        return text.strip()
+        """Iteratively extracts unchunked text and tables for this node and children."""
+        text_blocks = [ "\n".join(self.content_blocks) ]
+        stack = list(reversed(self.children))
+        
+        while stack:
+            curr = stack.pop()
+            if curr.content_blocks:
+                text_blocks.append("\n".join(curr.content_blocks))
+            if curr.children:
+                stack.extend(reversed(curr.children))
+                
+        return "\n\n".join(filter(None, text_blocks)).strip()
 
 
 class IntentAndRoutingOutput(BaseModel):
@@ -77,10 +89,15 @@ class VectorlessEngine:
         # Configure lightweight options to keep RAM low during batch execution
         pipeline_options = PdfPipelineOptions()
         pipeline_options.generate_page_images = False
+        pipeline_options.do_ocr = False  # Disable OCR to prevent memory spikes
+        pipeline_options.do_table_structure = True  # Retain structural table extraction
         
         self.converter = DocumentConverter(
             format_options={
-                InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
+                InputFormat.PDF: PdfFormatOption(
+                    pipeline_options=pipeline_options,
+                    backend=PyPdfiumDocumentBackend  # Uses PDFium backend to bypass C++ bad_alloc bug on Windows
+                )
             }
         )
         self.cache_dir = Path(cache_dir)
@@ -135,12 +152,12 @@ class VectorlessEngine:
 
         return root
 
-    def parse_file_to_tree(self, file_path: str, batch_size: int = 30) -> TreeNode:
+    def parse_file_to_tree(self, file_path: str, batch_size: int = 15) -> TreeNode:
         """
-        Converts multi-format files using Docling.
-        Uses page-range batching via temporary sub-PDFs for large files to avoid bad_alloc errors.
+        Converts multi-format files using Docling and PyPdfium.
+        Uses 15-page batching via temporary sub-PDFs for large files to keep RAM lightweight.
         """
-        logger.info(f"📖 [PARSING] Processing file with Docling: {file_path}")
+        logger.info(f"📖 [PARSING] Processing file with Docling (PyPdfium): {file_path}")
         root_title = Path(file_path).name
 
         total_pages = 0
@@ -206,32 +223,46 @@ class VectorlessEngine:
         conversion_result = self.converter.convert(file_path)
         return self._parse_single_doc_to_tree(conversion_result.document, root_title)
 
-    async def generate_node_summaries(self, node: TreeNode):
-        """Generates fast 1-2 sentence abstracts for each section asynchronously via Gateway with Rate-Limit Failover."""
-        raw_text = "\n".join(node.content_blocks)
+    async def generate_node_summaries(self, root_node: TreeNode):
+        """Generates fast section summaries using an iterative BFS queue to avoid recursion stack limits."""
+        all_nodes: List[TreeNode] = []
+        queue = [root_node]
+        
+        # Flatten tree using BFS
+        while queue:
+            curr = queue.pop(0)
+            all_nodes.append(curr)
+            if curr.children:
+                queue.extend(curr.children)
 
-        if raw_text:
-            try:
-                response = await acompletion(
-                    model=settings.LLM_RAG_PRIMARY,
-                    messages=[
-                        {"role": "system", "content": "Summarize the key information in this section in 1-2 clear sentences."},
-                        {"role": "user", "content": f"Section: {node.title}\nContent:\n{raw_text[:1500]}"}
-                    ],
-                    max_tokens=90,
-                    temperature=0.0,
-                    fallbacks=[settings.LLM_RAG_FALLBACK],
-                    num_retries=2,
-                )
-                node.summary = response.choices[0].message.content.strip()
-            except Exception as e:
-                logger.warning(f"Failed to generate summary for section '{node.title}': {e}")
-                node.summary = f"Section text content under {node.title}"
-        else:
-            node.summary = f"Section topic group under {node.title}"
+        semaphore = asyncio.Semaphore(10)  # Rate-limit concurrency
 
-        if node.children:
-            await asyncio.gather(*[self.generate_node_summaries(child) for child in node.children])
+        async def summarize_node(node: TreeNode):
+            raw_text = "\n".join(node.content_blocks)
+            if not raw_text:
+                node.summary = f"Section topic group under {node.title}"
+                return
+
+            async with semaphore:
+                try:
+                    response = await acompletion(
+                        model=settings.LLM_RAG_PRIMARY,
+                        messages=[
+                            {"role": "system", "content": "Summarize the key information in this section in 1-2 clear sentences."},
+                            {"role": "user", "content": f"Section: {node.title}\nContent:\n{raw_text[:1500]}"}
+                        ],
+                        max_tokens=90,
+                        temperature=0.0,
+                        fallbacks=[settings.LLM_RAG_FALLBACK],
+                        num_retries=2,
+                    )
+                    node.summary = response.choices[0].message.content.strip()
+                except Exception as e:
+                    logger.warning(f"Failed to generate summary for section '{node.title}': {e}")
+                    node.summary = f"Section text content under {node.title}"
+
+        # Run summaries concurrently across collected nodes safely
+        await asyncio.gather(*[summarize_node(n) for n in all_nodes])
 
     def save_tree_to_cache(self, file_hash: str, root_node: TreeNode):
         """Stores structured JSON tree to local disk cache."""
@@ -342,12 +373,17 @@ User Query: {query}"""
 # 4. CONTENT FETCHING & SERVICE WORKFLOW
 # =====================================================================
 def fetch_node_content(node: TreeNode, target_ids: List[str]) -> List[str]:
-    """Retrieves unchunked text and tables strictly from target node IDs."""
+    """Retrieves unchunked text and tables strictly from target node IDs iteratively."""
     extracted = []
-    if node.node_id in target_ids:
-        extracted.append(f"### {node.title} (Pages: {node.page_numbers})\n{node.full_content()}")
-    for child in node.children:
-        extracted.extend(fetch_node_content(child, target_ids))
+    queue = [node]
+    
+    while queue:
+        curr = queue.pop(0)
+        if curr.node_id in target_ids:
+            extracted.append(f"### {curr.title} (Pages: {curr.page_numbers})\n{curr.full_content()}")
+        if curr.children:
+            queue.extend(curr.children)
+            
     return extracted
 
 

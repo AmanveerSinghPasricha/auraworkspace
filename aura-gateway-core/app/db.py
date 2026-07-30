@@ -1,0 +1,65 @@
+import os
+import ssl
+from pathlib import Path
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+from dotenv import load_dotenv
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+from sqlalchemy.orm import declarative_base
+
+# Load environment variables
+BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(dotenv_path=BASE_DIR / ".env")
+
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "postgresql+asyncpg://postgres:postgres@localhost:5432/auradb"
+)
+
+# 1. Convert driver scheme to asyncpg
+if DATABASE_URL.startswith("postgresql://"):
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
+
+# 2. Strip conflicting query parameters (sslmode, channel_binding) for asyncpg compatibility
+parsed_url = urlparse(DATABASE_URL)
+if parsed_url.query:
+    query_params = parse_qs(parsed_url.query)
+    # Remove parameters asyncpg rejects
+    query_params.pop("sslmode", None)
+    query_params.pop("channel_binding", None)
+    
+    new_query = urlencode(query_params, doseq=True)
+    DATABASE_URL = urlunparse((
+        parsed_url.scheme,
+        parsed_url.netloc,
+        parsed_url.path,
+        parsed_url.params,
+        new_query,
+        parsed_url.fragment
+    ))
+
+# 3. Configure SSL context safely for Neon remote databases
+connect_args = {}
+if "neon.tech" in DATABASE_URL or "ssl" in parsed_url.query:
+    ssl_context = ssl.create_default_context()
+    ssl_context.check_hostname = False
+    ssl_context.verify_mode = ssl.CERT_NONE
+    connect_args["ssl"] = ssl_context
+
+engine = create_async_engine(
+    DATABASE_URL,
+    echo=False,
+    future=True,
+    connect_args=connect_args
+)
+
+AsyncSessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+Base = declarative_base()
+
+async def get_db():
+    """FastAPI dependency yielding an async database session per request."""
+    async with AsyncSessionLocal() as session:
+        try:
+            yield session
+        finally:
+            await session.close()
