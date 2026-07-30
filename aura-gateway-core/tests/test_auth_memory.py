@@ -1,6 +1,17 @@
 import pytest
+import pytest_asyncio
 from httpx import AsyncClient, ASGITransport
 from app.main import app
+from app.db import engine, Base
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def setup_test_database():
+    """Ensures database tables exist before each test (critical for SQLite in-memory)."""
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    yield
+
 
 @pytest.mark.asyncio
 async def test_signup_success():
