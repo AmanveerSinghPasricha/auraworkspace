@@ -1,10 +1,18 @@
+import os
 import sys
 import asyncio
 import pytest
 import pytest_asyncio
-from langchain_core.messages import HumanMessage
-from app.state import UserProfileContext
-from app.db import engine
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Force load .env if present locally
+BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(dotenv_path=BASE_DIR / ".env", override=False)
+
+# Fallback to in-memory SQLite if no DATABASE_URL is set or if it defaults to localhost
+if not os.getenv("DATABASE_URL") or "localhost" in os.getenv("DATABASE_URL", ""):
+    os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///:memory:"
 
 # Fix Psycopg/asyncpg event loop policy on Windows
 if sys.platform == "win32":
@@ -20,16 +28,10 @@ def event_loop():
     loop.close()
 
 
-@pytest_asyncio.fixture(autouse=True)
-async def cleanup_db_engine():
-    """Disposes stale asyncpg pool connections between tests."""
-    yield
-    await engine.dispose()
-
-
 @pytest.fixture
 def mock_user_context():
     """Provides a reusable mock UserProfileContext."""
+    from app.state import UserProfileContext
     return UserProfileContext(
         user_id="test_user_01",
         department="Engineering",
@@ -41,6 +43,7 @@ def mock_user_context():
 @pytest.fixture
 def mock_initial_state(mock_user_context):
     """Provides a complete initial GraphState input dictionary."""
+    from langchain_core.messages import HumanMessage
     return {
         "messages": [HumanMessage(content="Hello, what can you do?")],
         "user_context": mock_user_context,
