@@ -15,7 +15,7 @@ DATABASE_URL = os.getenv(
     "postgresql+asyncpg://postgres:postgres@localhost:5432/auradb"
 )
 
-# 1. Convert driver scheme to asyncpg
+# 1. Convert driver scheme to asyncpg if standard postgresql://
 if DATABASE_URL.startswith("postgresql://"):
     DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
 
@@ -23,7 +23,6 @@ if DATABASE_URL.startswith("postgresql://"):
 parsed_url = urlparse(DATABASE_URL)
 if parsed_url.query:
     query_params = parse_qs(parsed_url.query)
-    # Remove parameters asyncpg rejects
     query_params.pop("sslmode", None)
     query_params.pop("channel_binding", None)
     
@@ -37,22 +36,40 @@ if parsed_url.query:
         parsed_url.fragment
     ))
 
-# 3. Configure SSL context safely for Neon remote databases
-connect_args = {}
-if "neon.tech" in DATABASE_URL or "ssl" in parsed_url.query:
-    ssl_context = ssl.create_default_context()
-    ssl_context.check_hostname = False
-    ssl_context.verify_mode = ssl.CERT_NONE
-    connect_args["ssl"] = ssl_context
+# 3. Base engine configuration
+engine_kwargs = {
+    "echo": False,
+    "future": True,
+}
 
-engine = create_async_engine(
-    DATABASE_URL,
-    echo=False,
-    future=True,
-    connect_args=connect_args
+# 4. Configure dialect-specific engine parameters
+if "sqlite" not in DATABASE_URL:
+    # SSL context safely configured for Neon remote databases
+    connect_args = {}
+    if "neon.tech" in DATABASE_URL or "ssl" in parsed_url.query:
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+        connect_args["ssl"] = ssl_context
+
+    # Pooling arguments applied only for PostgreSQL
+    engine_kwargs.update({
+        "pool_pre_ping": True,
+        "pool_recycle": 300,
+        "pool_size": 10,
+        "max_overflow": 20,
+        "connect_args": connect_args,
+    })
+
+engine = create_async_engine(DATABASE_URL, **engine_kwargs)
+
+AsyncSessionLocal = async_sessionmaker(
+    engine, 
+    class_=AsyncSession, 
+    expire_on_commit=False,
+    autocommit=False,
+    autoflush=False
 )
-
-AsyncSessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 Base = declarative_base()
 
@@ -61,5 +78,8 @@ async def get_db():
     async with AsyncSessionLocal() as session:
         try:
             yield session
+        except Exception:
+            await session.rollback()
+            raise
         finally:
             await session.close()

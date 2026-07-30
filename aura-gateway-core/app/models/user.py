@@ -1,5 +1,6 @@
 import uuid
-from sqlalchemy import Column, String, DateTime, JSON, Text
+from sqlalchemy import Column, String, DateTime, Text, JSON
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.sql import func
 from app.db import Base
 
@@ -16,8 +17,11 @@ class User(Base):
     primary_goal = Column(Text, nullable=False)
     preferred_tone = Column(String, default="Direct & Concise")
     
-    # JSON handles list storage across Postgres, SQLite, MySQL, and pytest
-    domain_expertise = Column(JSON, default=list)
-    additional_context = Column(Text, nullable=True)
+    # ARRAY for Postgres production; JSON variant for SQLite pytest suite
+    domain_expertise = Column(
+        ARRAY(String).with_variant(JSON, "sqlite"),
+        default=list
+    )
+    additional_context = Column(Text, nullable=True, default="")
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
