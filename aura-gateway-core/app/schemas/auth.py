@@ -10,9 +10,9 @@ class UserSignUpRequest(BaseModel):
     # Long-Term Memory Profiling Questionnaire
     role_or_title: str = Field(..., description="e.g., Security Analyst, Software Engineer, Executive")
     primary_goal: str = Field(..., description="Primary reason for using Aura AI")
-    preferred_tone: str = Field("Direct & Concise", description="Direct & Concise, Detailed & Technical, Conversational")
-    domain_expertise: List[str] = Field(default_factory=list, description="e.g., ['NIST', 'FastAPI', 'AWS']")
-    additional_context: Optional[str] = Field(None, description="Custom facts or rules the AI should always remember")
+    preferred_tone: str = Field(default="Direct & Concise", description="Direct & Concise, Detailed & Technical, Conversational")
+    domain_expertise: List[str] = Field(default=[], description="e.g., ['NIST', 'FastAPI', 'AWS']")
+    additional_context: Optional[str] = Field(default="", description="Custom facts or rules the AI should always remember")
 
 
 class UserLoginRequest(BaseModel):
@@ -33,6 +33,6 @@ class UserMemoryProfileResponse(BaseModel):
     role_or_title: str
     primary_goal: str
     preferred_tone: str
-    domain_expertise: List[str]
-    additional_context: Optional[str]
+    domain_expertise: List[str] = []
+    additional_context: Optional[str] = ""
     profile_summary: str

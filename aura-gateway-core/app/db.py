@@ -45,14 +45,25 @@ if "neon.tech" in DATABASE_URL or "ssl" in parsed_url.query:
     ssl_context.verify_mode = ssl.CERT_NONE
     connect_args["ssl"] = ssl_context
 
+# 4. Engine setup with connection health-check pooling for Neon serverless
 engine = create_async_engine(
     DATABASE_URL,
     echo=False,
     future=True,
+    pool_pre_ping=True,  # Test connection health before reusing (prevents "connection is closed" errors)
+    pool_recycle=300,    # Recycle idle connections every 5 minutes
+    pool_size=10,
+    max_overflow=20,
     connect_args=connect_args
 )
 
-AsyncSessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+AsyncSessionLocal = async_sessionmaker(
+    engine, 
+    class_=AsyncSession, 
+    expire_on_commit=False,
+    autocommit=False,
+    autoflush=False
+)
 
 Base = declarative_base()
 
@@ -61,5 +72,8 @@ async def get_db():
     async with AsyncSessionLocal() as session:
         try:
             yield session
+        except Exception:
+            await session.rollback()
+            raise
         finally:
             await session.close()
