@@ -1,9 +1,10 @@
 """
 Aura Gateway Core - Primary FastAPI Gateway Server
 ==================================================
-Exposes REST, Streaming, and Ingestion API endpoints for the multi-agent state graph.
-Handles lifecycle events for Neon Postgres database connection pooling,
-checkpointer initialization, thread-scoped execution, and async document processing.
+Exposes REST, Streaming, Ingestion, and Phase 4 Auth & Memory API endpoints
+for the multi-agent state graph. Handles lifecycle events for Neon Postgres database
+connection pooling, checkpointer initialization, thread-scoped execution,
+and async document processing.
 """
 
 import os
@@ -21,9 +22,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from langchain_core.messages import HumanMessage
+from sqlalchemy.future import select
 
 from app.config import settings
 from app.database import get_db_pool, close_db_pool
+from app.db import engine, Base, AsyncSessionLocal
+from app.models.user import User
+from app.routers.auth import router as auth_router
 from app.state import GraphState, UserProfileContext
 
 # Memory safety settings for native C++ allocators
@@ -48,16 +53,21 @@ ingestion_jobs: Dict[str, Dict[str, Any]] = {}
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    Manages database pool initialization and LangGraph state graph compilation on startup.
-    Ensures safe resource cleanup on shutdown.
+    Manages database pool initialization, ORM table creation, and LangGraph
+    state graph compilation on startup. Ensures safe resource cleanup on shutdown.
     """
     global compiled_aura_graph
     logger.info("🚀 [GATEWAY STARTUP] Initializing Aura Gateway Core server...")
 
     try:
-        # Initialize Neon Postgres connection pool
+        # Initialize Neon Postgres connection pool (psycopg)
         pool = await get_db_pool()
         logger.info("✅ [DATABASE] Database connection pool established successfully.")
+
+        # Phase 4: Create ORM tables (Users, Long-term Memory) if they don't exist
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        logger.info("✅ [DATABASE ORM] Database schema models verified & created.")
 
         # Lazy import graph builder to defer heavy ML package loading until after DB init
         from app.graph import create_aura_graph
@@ -80,7 +90,7 @@ async def lifespan(app: FastAPI):
 # =====================================================================
 app = FastAPI(
     title="Aura Gateway Core API",
-    description="Enterprise Multi-Agent LLM Gateway & Execution Engine built with LangGraph and LiteLLM.",
+    description="Enterprise Multi-Agent LLM Gateway & Execution Engine built with LangGraph, LiteLLM, and Phase 4 Memory Profiling.",
     version="1.0.0",
     lifespan=lifespan,
 )
@@ -94,10 +104,36 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Phase 4 Router Registration
+app.include_router(auth_router)
+
 
 # =====================================================================
-# 3. REQUEST / RESPONSE SCHEMAS
+# 3. HELPER UTILITIES & SCHEMAS
 # =====================================================================
+async def fetch_user_memory_summary(user_id: str) -> Optional[str]:
+    """Retrieves long-term user memory profile from DB to inject into graph execution context."""
+    async with AsyncSessionLocal() as session:
+        try:
+            result = await session.execute(select(User).where(User.id == user_id))
+            user = result.scalars().first()
+            if not user:
+                return None
+            
+            expertise_str = ", ".join(user.domain_expertise) if user.domain_expertise else "None specified"
+            return (
+                f"User Name: {user.full_name}\n"
+                f"Role/Title: {user.role_or_title}\n"
+                f"Primary Goal: {user.primary_goal}\n"
+                f"Communication Tone: {user.preferred_tone}\n"
+                f"Domain Expertise: {expertise_str}\n"
+                f"Custom Memory Notes: {user.additional_context or 'None'}"
+            )
+        except Exception as exc:
+            logger.warning(f"⚠️ Could not load memory profile for user '{user_id}': {exc}")
+            return None
+
+
 class ChatRequestPayload(BaseModel):
     user_id: str = Field(default="user_default", description="Unique ID of the requesting user")
     thread_id: str = Field(default="thread_demo_001", description="Session thread ID for conversation scoping")
@@ -160,6 +196,9 @@ async def event_stream_generator(payload: ChatRequestPayload) -> AsyncGenerator[
 
     logger.info(f"🌊 [STREAM] Initiating event stream for thread '{payload.thread_id}'...")
 
+    # Load Phase 4 Long-term Memory Profile
+    memory_profile = await fetch_user_memory_summary(payload.user_id)
+
     user_context = UserProfileContext(
         user_id=payload.user_id,
         department=payload.department,
@@ -175,6 +214,7 @@ async def event_stream_generator(payload: ChatRequestPayload) -> AsyncGenerator[
             "raw_text": payload.message,
             "file_hash": payload.file_hash,
             "document_ref": payload.document_ref,
+            "user_memory_profile": memory_profile,  # <--- Injected Phase 4 Long-Term Memory
         },
     }
 
@@ -248,6 +288,9 @@ async def execute_chat_query(payload: ChatRequestPayload):
 
     logger.info(f"📩 [REQUEST] Processing query for thread '{payload.thread_id}' from user '{payload.user_id}'...")
 
+    # Load Phase 4 Long-term Memory Profile
+    memory_profile = await fetch_user_memory_summary(payload.user_id)
+
     user_context = UserProfileContext(
         user_id=payload.user_id,
         department=payload.department,
@@ -263,6 +306,7 @@ async def execute_chat_query(payload: ChatRequestPayload):
             "raw_text": payload.message,
             "file_hash": payload.file_hash,
             "document_ref": payload.document_ref,
+            "user_memory_profile": memory_profile,  # <--- Injected Phase 4 Long-Term Memory
         },
     }
 
