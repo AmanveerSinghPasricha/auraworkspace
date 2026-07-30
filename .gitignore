@@ -26,3 +26,6 @@ out/
 .idea/
 .DS_Store
 Thumbs.db
+
+repomix-output.xml
+pytest.ini
