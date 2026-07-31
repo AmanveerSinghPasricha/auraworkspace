@@ -1,9 +1,10 @@
-import './globals.css';
-import type { Metadata } from 'next';
+import type { Metadata } from "next";
+import { AuthProvider } from "@/context/AuthContext";
+import "./globals.css";
 
 export const metadata: Metadata = {
-  title: 'Aura Workspace',
-  description: 'AURA Enterprise Workspace',
+  title: "Aura Workspace",
+  description: "Enterprise Agent Platform",
 };
 
 export default function RootLayout({
@@ -13,7 +14,9 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body>
+        <AuthProvider>{children}</AuthProvider>
+      </body>
     </html>
   );
 }
