@@ -15,11 +15,15 @@ DATABASE_URL = os.getenv(
     "postgresql+asyncpg://postgres:postgres@localhost:5432/auradb"
 )
 
+# Detect if SSL was requested originally in the query parameters
+raw_url_lower = DATABASE_URL.lower()
+requires_ssl = "neon.tech" in raw_url_lower or "ssl" in raw_url_lower or "sslmode" in raw_url_lower
+
 # 1. Convert driver scheme to asyncpg if standard postgresql://
 if DATABASE_URL.startswith("postgresql://"):
     DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
 
-# 2. Strip conflicting query parameters (sslmode, channel_binding) for asyncpg compatibility
+# 2. Strip parameters (sslmode, channel_binding) that break asyncpg
 parsed_url = urlparse(DATABASE_URL)
 if parsed_url.query:
     query_params = parse_qs(parsed_url.query)
@@ -44,9 +48,8 @@ engine_kwargs = {
 
 # 4. Configure dialect-specific engine parameters
 if "sqlite" not in DATABASE_URL:
-    # SSL context safely configured for Neon remote databases
     connect_args = {}
-    if "neon.tech" in DATABASE_URL or "ssl" in parsed_url.query:
+    if requires_ssl:
         ssl_context = ssl.create_default_context()
         ssl_context.check_hostname = False
         ssl_context.verify_mode = ssl.CERT_NONE
@@ -63,12 +66,11 @@ if "sqlite" not in DATABASE_URL:
 
 engine = create_async_engine(DATABASE_URL, **engine_kwargs)
 
+# Configured cleanly for SQLAlchemy 2.0 Async Session Factory
 AsyncSessionLocal = async_sessionmaker(
     engine, 
     class_=AsyncSession, 
-    expire_on_commit=False,
-    autocommit=False,
-    autoflush=False
+    expire_on_commit=False
 )
 
 Base = declarative_base()
@@ -81,5 +83,3 @@ async def get_db():
         except Exception:
             await session.rollback()
             raise
-        finally:
-            await session.close()

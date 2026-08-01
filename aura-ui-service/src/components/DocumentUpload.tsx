@@ -9,27 +9,77 @@ export function DocumentUpload() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { documents, addDocument, updateDocumentStatus } = useAppStore();
 
+  const pollJobStatus = (tempId: string, jobId: string) => {
+    let simulatedProgress = 30;
+
+    const interval = setInterval(async () => {
+      try {
+        const jobData = await api.getIngestionStatus(jobId);
+
+        if (jobData.status === 'processing' || jobData.status === 'queued') {
+          // Increment progress while background chunks convert (30% -> 90%)
+          simulatedProgress = Math.min(simulatedProgress + 10, 90);
+          updateDocumentStatus(tempId, {
+            status: 'processing',
+            progress: jobData.progress || simulatedProgress,
+          });
+        } else if (jobData.status === 'completed') {
+          clearInterval(interval);
+          
+          // Extract background worker result metadata
+          const resultData = jobData.result || {};
+          
+          updateDocumentStatus(tempId, {
+            status: 'completed',
+            progress: 100,
+            // Attach active document pointers to global store for chat calls
+            documentRef: resultData.document_ref || resultData.file_path,
+            fileHash: resultData.file_hash,
+          });
+        } else if (jobData.status === 'failed') {
+          clearInterval(interval);
+          updateDocumentStatus(tempId, {
+            status: 'failed',
+            error: jobData.error || 'Ingestion failed',
+          });
+        }
+      } catch {
+        clearInterval(interval);
+        updateDocumentStatus(tempId, {
+          status: 'failed',
+          error: 'Failed to fetch ingestion status',
+        });
+      }
+    }, 2000);
+  };
+
   const handleFileUpload = async (file: File) => {
     const tempId = Date.now().toString();
     addDocument({
       id: tempId,
       filename: file.name,
       status: 'uploading',
-      progress: 25,
+      progress: 15,
     });
 
     try {
       const formData = new FormData();
       formData.append('file', file);
 
-      updateDocumentStatus(tempId, { progress: 60, status: 'processing' });
+      updateDocumentStatus(tempId, { progress: 30, status: 'processing' });
       const result = await api.uploadDocument(formData);
 
-      updateDocumentStatus(tempId, {
-        id: result.id || tempId,
-        status: 'completed',
-        progress: 100,
-      });
+      if (result.job_id) {
+        pollJobStatus(tempId, result.job_id);
+      } else {
+        updateDocumentStatus(tempId, {
+          id: result.id || tempId,
+          status: 'completed',
+          progress: 100,
+          documentRef: result.document_ref || result.file_path,
+          fileHash: result.file_hash,
+        });
+      }
     } catch (err) {
       updateDocumentStatus(tempId, {
         status: 'failed',
@@ -95,16 +145,20 @@ export function DocumentUpload() {
                     ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
                     : doc.status === 'failed'
                     ? 'bg-rose-950 text-rose-400 border border-rose-800'
-                    : 'bg-amber-950 text-amber-400 border border-amber-800'
+                    : 'bg-amber-950 text-amber-400 border border-amber-800 animate-pulse'
                 }`}
               >
-                {doc.status}
+                {doc.status === 'processing' || doc.status === 'uploading'
+                  ? `${doc.progress}%`
+                  : doc.status}
               </span>
             </div>
+
+            {/* Dynamic Progress Bar */}
             {doc.status !== 'completed' && doc.status !== 'failed' && (
-              <div className="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden">
+              <div className="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden mt-1">
                 <div
-                  className="bg-indigo-500 h-full transition-all duration-300"
+                  className="bg-indigo-500 h-full transition-all duration-500 ease-out"
                   style={{ width: `${doc.progress}%` }}
                 />
               </div>

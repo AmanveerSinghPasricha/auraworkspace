@@ -30,22 +30,19 @@ export async function apiRequest<T>(
 export const api = {
   checkHealth: () => apiRequest<SystemHealth>('/health'),
 
-  // FIXED: Changed payload key from 'prompt' to 'message' to match FastAPI schema
   sendMessage: (message: string) =>
     apiRequest<Message>('/api/v1/chat', {
       method: 'POST',
       body: JSON.stringify({ message }),
     }),
 
-  // FIXED: Added auth bearer token and detail error parsing for uploads
-  uploadDocument: async (formData: FormData): Promise<DocumentStatus> => {
+  uploadDocument: async (formData: FormData): Promise<DocumentStatus & { job_id?: string }> => {
     const token = typeof window !== 'undefined' ? localStorage.getItem('access_token') : null;
 
     const response = await fetch(`${API_BASE_URL}/api/v1/documents/upload`, {
       method: 'POST',
       headers: {
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        // Note: Do NOT set 'Content-Type' manually here so the browser sets multipart boundaries automatically
       },
       body: formData,
     });
@@ -57,4 +54,12 @@ export const api = {
 
     return response.json();
   },
+
+  getIngestionStatus: (jobId: string) =>
+    apiRequest<{
+      status: 'queued' | 'processing' | 'completed' | 'failed';
+      progress?: number;
+      filename?: string;
+      error?: string;
+    }>(`/api/v1/documents/status/${jobId}`),
 };
