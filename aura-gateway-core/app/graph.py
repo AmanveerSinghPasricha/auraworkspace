@@ -34,19 +34,20 @@ def route_next_action(state: GraphState) -> Literal["rag_engine", "general_agent
     and directs the execution path to the designated node.
     """
     if state.validation_errors:
-        logger.warning(f"?? [GRAPH ROUTER] Validation errors detected. Terminating flow: {state.validation_errors}")
+        logger.warning(f"⚠️ [GRAPH ROUTER] Validation errors detected. Terminating flow: {state.validation_errors}")
         return END
 
     selected_route = state.router_state.active_route.upper() if state.router_state else "GENERAL_AGENT"
 
-    if selected_route == "RAG_TREE":
-        logger.info("?? [GRAPH ROUTE] Driving execution to -> rag_engine")
+    # Handles both 'RAG_ENGINE' and 'RAG_TREE' route strings
+    if selected_route in ["RAG_ENGINE", "RAG_TREE"]:
+        logger.info("🔀 [GRAPH ROUTE] Driving execution to -> rag_engine")
         return "rag_engine"
-    elif selected_route == "EXTRACTOR":
-        logger.info("?? [GRAPH ROUTE] Driving execution to -> data_extractor")
+    elif selected_route in ["DATA_EXTRACTOR", "EXTRACTOR"]:
+        logger.info("🔀 [GRAPH ROUTE] Driving execution to -> data_extractor")
         return "data_extractor"
     else:
-        logger.info("?? [GRAPH ROUTE] Driving execution to -> general_agent")
+        logger.info("🔀 [GRAPH ROUTE] Driving execution to -> general_agent")
         return "general_agent"
 
 
@@ -60,7 +61,7 @@ def create_aura_graph(
     """
     Constructs and compiles the Aura Gateway Core state graph workflow.
     """
-    logger.info("??? [GRAPH BUILD] Assembling state graph workflow...")
+    logger.info("🛠️ [GRAPH BUILD] Assembling state graph workflow...")
 
     # Initialize StateGraph with central GraphState schema
     workflow = StateGraph(GraphState)
@@ -99,5 +100,5 @@ def create_aura_graph(
         store=store
     )
 
-    logger.info("? [GRAPH BUILD] Aura Workspace State Graph compiled successfully!")
+    logger.info("✅ [GRAPH BUILD] Aura Workspace State Graph compiled successfully!")
     return compiled_app
