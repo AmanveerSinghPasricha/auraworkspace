@@ -21,6 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from langchain_core.messages import HumanMessage
+from langgraph.types import Command
 from sqlalchemy.future import select
 
 from app.config import settings
@@ -28,6 +29,11 @@ from app.database import get_db_pool, close_db_pool
 from app.db import engine, Base, AsyncSessionLocal
 from app.models.user import User
 from app.routers.auth import router as auth_router
+try:
+    from app.routers.github_auth import router as github_auth_router
+except ImportError:
+    github_auth_router = None
+
 from app.state import GraphState, UserProfileContext
 
 os.environ["MALLOC_TRIM_THRESHOLD_"] = "65536"
@@ -91,13 +97,23 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3001", "http://localhost:3000", "http://127.0.0.1:3001", "*"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3001",
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# Register Primary Routers
 app.include_router(auth_router)
+if github_auth_router:
+    app.include_router(github_auth_router)
 
 
 # =====================================================================
@@ -112,14 +128,9 @@ async def fetch_user_memory_summary(user_id: str) -> Optional[str]:
             if not user:
                 return None
             
-            expertise_str = ", ".join(user.domain_expertise) if user.domain_expertise else "None specified"
             return (
-                f"User Name: {user.full_name}\n"
-                f"Role/Title: {user.role_or_title}\n"
-                f"Primary Goal: {user.primary_goal}\n"
-                f"Communication Tone: {user.preferred_tone}\n"
-                f"Domain Expertise: {expertise_str}\n"
-                f"Custom Memory Notes: {user.additional_context or 'None'}"
+                f"User Name: {user.full_name or 'N/A'}\n"
+                f"User Email: {user.email or 'N/A'}"
             )
         except Exception as exc:
             logger.warning(f"⚠️ Could not load memory profile for user '{user_id}': {exc}")
@@ -127,7 +138,7 @@ async def fetch_user_memory_summary(user_id: str) -> Optional[str]:
 
 
 class ChatRequestPayload(BaseModel):
-    user_id: str = Field(default="user_default", description="Unique ID of the requesting user")
+    user_id: Optional[str] = Field(default="02b7cfb6-f0b2-4d6e-a87b-0b85d4af5fb6", description="Unique ID of the requesting user")
     thread_id: str = Field(default="thread_demo_001", description="Session thread ID for conversation scoping")
     message: str = Field(..., description="User prompt or query string")
     department: Optional[str] = Field(default="Engineering", description="User department context")
@@ -143,6 +154,11 @@ class ChatResponsePayload(BaseModel):
     response: str
     pii_redacted: bool = False
     validation_errors: List[str] = Field(default_factory=list)
+
+
+class ResumeRequestPayload(BaseModel):
+    thread_id: str = Field(..., description="Active session thread ID")
+    approved: bool = Field(..., description="Human approval decision")
 
 
 # =====================================================================
@@ -195,12 +211,13 @@ async def event_stream_generator(payload: ChatRequestPayload) -> AsyncGenerator[
         yield f"data: {json.dumps({'type': 'error', 'message': 'Graph engine is uninitialized.'})}\n\n"
         return
 
-    logger.info(f"🌊 [STREAM] Initiating event stream for thread '{payload.thread_id}'...")
+    resolved_user_id = payload.user_id if payload.user_id and payload.user_id != "user_default" else "02b7cfb6-f0b2-4d6e-a87b-0b85d4af5fb6"
+    logger.info(f"🌊 [STREAM] Initiating event stream for thread '{payload.thread_id}' (User: {resolved_user_id})...")
 
-    memory_profile = await fetch_user_memory_summary(payload.user_id)
+    memory_profile = await fetch_user_memory_summary(resolved_user_id)
 
     user_context = UserProfileContext(
-        user_id=payload.user_id,
+        user_id=resolved_user_id,
         department=payload.department,
         role_title=payload.role_title,
         preferred_language=payload.preferred_language,
@@ -208,6 +225,7 @@ async def event_stream_generator(payload: ChatRequestPayload) -> AsyncGenerator[
 
     initial_state = {
         "messages": [HumanMessage(content=payload.message)],
+        "user_id": resolved_user_id,
         "user_context": user_context,
         "staged_action_payload": {
             "resolved_query": payload.message, 
@@ -225,7 +243,7 @@ async def event_stream_generator(payload: ChatRequestPayload) -> AsyncGenerator[
             kind = event.get("event")
             node_name = event.get("name", "")
 
-            if kind == "on_chain_start" and node_name in ["pii_redaction", "supervisor_router", "general_agent", "rag_engine", "data_extractor"]:
+            if kind == "on_chain_start" and node_name in ["pii_redaction", "supervisor_router", "general_agent", "rag_engine", "data_extractor", "email_agent", "github_agent"]:
                 yield f"data: {json.dumps({'type': 'node_start', 'node': node_name})}\n\n"
 
             elif kind == "on_chat_model_stream":
@@ -286,12 +304,13 @@ async def execute_chat_query(payload: ChatRequestPayload):
             detail="State graph engine is not initialized.",
         )
 
-    logger.info(f"📩 [REQUEST] Processing query for thread '{payload.thread_id}' from user '{payload.user_id}'...")
+    resolved_user_id = payload.user_id if payload.user_id and payload.user_id != "user_default" else "02b7cfb6-f0b2-4d6e-a87b-0b85d4af5fb6"
+    logger.info(f"📩 [REQUEST] Processing query for thread '{payload.thread_id}' from user '{resolved_user_id}'...")
 
-    memory_profile = await fetch_user_memory_summary(payload.user_id)
+    memory_profile = await fetch_user_memory_summary(resolved_user_id)
 
     user_context = UserProfileContext(
-        user_id=payload.user_id,
+        user_id=resolved_user_id,
         department=payload.department,
         role_title=payload.role_title,
         preferred_language=payload.preferred_language,
@@ -299,6 +318,7 @@ async def execute_chat_query(payload: ChatRequestPayload):
 
     initial_state = {
         "messages": [HumanMessage(content=payload.message)],
+        "user_id": resolved_user_id,
         "user_context": user_context,
         "staged_action_payload": {
             "resolved_query": payload.message, 
@@ -343,6 +363,42 @@ async def execute_chat_query(payload: ChatRequestPayload):
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Execution engine failure: {str(exc)}",
+        )
+
+
+@app.post("/api/v1/chat/resume", tags=["Execution Engine"])
+async def resume_interrupted_chat(payload: ResumeRequestPayload):
+    """Resumes a paused state graph execution following a Human-In-The-Loop interrupt."""
+    if not compiled_aura_graph:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="State graph engine is uninitialized."
+        )
+
+    config = {"configurable": {"thread_id": payload.thread_id}}
+
+    try:
+        logger.info(f"🔄 [RESUME REQUEST] Resuming workflow for thread '{payload.thread_id}' with decision: approved={payload.approved}")
+        
+        final_state = await compiled_aura_graph.ainvoke(
+            Command(resume={"approved": payload.approved}),
+            config=config
+        )
+
+        response_text = "Action processed."
+        if final_state.get("messages"):
+            response_text = str(final_state["messages"][-1].content)
+
+        return {
+            "thread_id": payload.thread_id,
+            "response": response_text,
+            "status": "resumed"
+        }
+    except Exception as exc:
+        logger.error(f"❌ [RESUME ERROR] Failed to resume workflow execution: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to resume execution: {str(exc)}",
         )
 
 
@@ -425,5 +481,5 @@ async def get_ingestion_job_status(job_id: str):
 # 7. DIRECT SERVER ENTRYPOINT
 # =====================================================================
 if __name__ == "__main__":
-    server_port = int(os.environ.get("PORT", 3001))
+    server_port = int(os.environ.get("PORT", 8000))
     uvicorn.run("app.main:app", host="0.0.0.0", port=server_port, reload=True)

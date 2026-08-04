@@ -1,31 +1,51 @@
 import os
-from datetime import datetime, timedelta, timezone
-from typing import Optional
-import jwt
-from pwdlib import PasswordHash
-from pwdlib.hashers.bcrypt import BcryptHasher
+import logging
+from cryptography.fernet import Fernet, InvalidToken
 
-# Modern password hasher using pwdlib (bypasses passlib Python 3.13 / bcrypt 4.x bug)
-password_hash = PasswordHash((BcryptHasher(),))
+logger = logging.getLogger("security")
 
-SECRET_KEY = os.getenv("JWT_SECRET_KEY", "aura-gateway-production-secret-key-change-me")
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 hours
+# Fallback Fernet key if ENCRYPTION_KEY is not set in env
+SECRET_KEY = os.getenv("ENCRYPTION_KEY", os.getenv("SECRET_KEY", "aura_secret_key_32_bytes_long_exact!!"))
 
-def hash_password(password: str) -> str:
-    """Hashes password safely, ensuring max length <= 72 bytes for bcrypt compatibility."""
-    # Truncate raw password bytes to 72 bytes max for bcrypt standard limits
-    safe_password = password.encode("utf-8")[:72].decode("utf-8", errors="ignore")
-    return password_hash.hash(safe_password)
+def get_fernet_instance():
+    try:
+        # Fernet requires a base64 32-byte key
+        import base64
+        key_bytes = SECRET_KEY.encode()
+        if len(key_bytes) < 32:
+            key_bytes = key_bytes.ljust(32, b'0')
+        elif len(key_bytes) > 32:
+            key_bytes = key_bytes[:32]
+        
+        fernet_key = base64.urlsafe_b64encode(key_bytes)
+        return Fernet(fernet_key)
+    except Exception as exc:
+        logger.error(f"❌ Failed to construct Fernet instance: {exc}")
+        raise exc
 
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Verifies plain password against hashed value."""
-    safe_password = plain_password.encode("utf-8")[:72].decode("utf-8", errors="ignore")
-    return password_hash.verify(safe_password, hashed_password)
+def encrypt_token(raw_token: str) -> str:
+    """Encrypts a raw OAuth token string."""
+    if not raw_token:
+        return ""
+    try:
+        fernet = get_fernet_instance()
+        return fernet.encrypt(raw_token.encode()).decode()
+    except Exception as exc:
+        logger.error(f"⚠️ Encryption failed: {exc}")
+        return raw_token
 
-def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
-    """Generates signed JWT access token."""
-    to_encode = data.copy()
-    expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
-    to_encode.update({"exp": expire})
-    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+def decrypt_token(encrypted_token: str) -> str:
+    """Decrypts an encrypted OAuth token string with fallback for raw unencrypted tokens."""
+    if not encrypted_token:
+        return ""
+    
+    # If token starts with standard GitHub OAuth prefixes, it's already raw/unencrypted
+    if encrypted_token.startswith(("ghp_", "gho_", "ghu_", "ghs_", "ghr_")):
+        return encrypted_token
+
+    try:
+        fernet = get_fernet_instance()
+        return fernet.decrypt(encrypted_token.encode()).decode()
+    except (InvalidToken, Exception) as exc:
+        logger.warning(f"⚠️ Fernet decryption failed ({exc}). Assuming raw token fallback...")
+        return encrypted_token
