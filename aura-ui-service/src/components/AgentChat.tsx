@@ -10,7 +10,7 @@ export function AgentChat() {
   const { user } = useAuth();
   const [input, setInput] = useState('');
   const [isSending, setIsSending] = useState(false);
-  const { messages, addMessage } = useAppStore();
+  const { messages, addMessage, activeDocument } = useAppStore();
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   // HITL Modal State
@@ -43,8 +43,16 @@ export function AgentChat() {
     setIsSending(true);
 
     try {
-      // Pass activeUserId and threadId along with the query text
-      const response = await api.sendMessage(userText, activeUserId, currentThreadId);
+      // Combined API Call: Passes user text, user ID, thread ID, and active document context (if attached)
+      const docContext = activeDocument
+        ? {
+            file_hash: activeDocument.file_hash,
+            document_ref: activeDocument.document_ref,
+            filename: activeDocument.filename,
+          }
+        : undefined;
+
+      const response = await api.sendMessage(userText, activeUserId, currentThreadId, docContext);
 
       // Track active thread ID if returned by gateway
       if (response.thread_id || response.threadId) {
@@ -158,13 +166,25 @@ export function AgentChat() {
         <div ref={chatEndRef} />
       </div>
 
+      {/* Active Document Context Banner */}
+      {activeDocument && (
+        <div className="mb-3 px-3 py-1.5 bg-indigo-950/40 border border-indigo-500/30 rounded-lg flex items-center gap-2 text-[11px] text-indigo-300">
+          <span className="w-2 h-2 rounded-full bg-indigo-400 animate-pulse"></span>
+          <span>RAG Active: <strong>{activeDocument.filename}</strong> ({activeDocument.chapters_detected} chapters)</span>
+        </div>
+      )}
+
       {/* Input Box */}
       <form onSubmit={handleSend} className="flex gap-2">
         <input
           type="text"
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder="Ask AURA agent or request document analysis..."
+          placeholder={
+            activeDocument 
+              ? `Ask questions about ${activeDocument.filename}...` 
+              : "Ask AURA agent or request document analysis..."
+          }
           className="flex-1 bg-slate-900 border border-slate-800 rounded-lg px-4 py-2.5 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-indigo-500 transition-colors"
         />
         <button
