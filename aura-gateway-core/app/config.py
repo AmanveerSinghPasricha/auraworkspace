@@ -4,6 +4,7 @@ Aura Gateway Core - Centralized Model & Environment Configuration
 
 import os
 from typing import Optional
+from pydantic import ConfigDict
 from pydantic_settings import BaseSettings
 
 
@@ -44,9 +45,7 @@ class Settings(BaseSettings):
     def LLM_FALLBACK(self) -> str:
         return self.LLM_GENERAL_FALLBACK
 
-    class Config:
-        env_file = ".env"
-        extra = "ignore"
+    model_config = ConfigDict(env_file=".env", extra="ignore")
 
 
 # Global Config Instance

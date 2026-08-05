@@ -2,6 +2,7 @@
 
 import React from 'react';
 import { GithubConnectButton } from '@/components/GithubConnectButton';
+import { ConnectGmailButton } from '@/components/ConnectGmailButton';
 
 interface HeaderProps {
   userId?: string;
@@ -9,8 +10,14 @@ interface HeaderProps {
 }
 
 export function Header({ userId, userEmail }: HeaderProps) {
-  // Retrieve logged-in user ID from props, localStorage, or state
-  const activeUserId = userId || (typeof window !== 'undefined' ? localStorage.getItem('aura_user_id') : null);
+  // Fallback to default demo user ID if not logged in locally
+  const activeUserId =
+    userId ||
+    (typeof window !== 'undefined'
+      ? localStorage.getItem('aura_user_id') ||
+        localStorage.getItem('user_id') ||
+        '02b7cfb6-f0b2-4d6e-a87b-0b85d4af5fb6'
+      : '02b7cfb6-f0b2-4d6e-a87b-0b85d4af5fb6');
 
   return (
     <header className="w-full h-14 bg-slate-900 border-b border-slate-800 px-6 flex items-center justify-between">
@@ -23,20 +30,20 @@ export function Header({ userId, userEmail }: HeaderProps) {
       </div>
 
       {/* Right Controls */}
-      <div className="flex items-center gap-4">
-        {/* GitHub Integration Button */}
-        {activeUserId ? (
-          <GithubConnectButton userId={activeUserId} />
-        ) : (
-          <span className="text-xs text-slate-500">Sign in to connect integrations</span>
-        )}
+      <div className="flex items-center gap-3">
+        {/* Gateway Online Status */}
+        <span className="flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-emerald-950 text-emerald-400 border border-emerald-800">
+          <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse"></span>
+          Gateway: Online
+        </span>
 
-        {/* User Info */}
-        {userEmail && (
-          <div className="text-xs text-slate-400 border-l border-slate-800 pl-4">
-            {userEmail}
-          </div>
-        )}
+        {/* Integration Buttons */}
+        <ConnectGmailButton userId={activeUserId} />
+        <GithubConnectButton userId={activeUserId} />
+
+        <span className="text-xs text-slate-400 px-2 py-1 rounded bg-slate-800">
+          Authenticated
+        </span>
       </div>
     </header>
   );

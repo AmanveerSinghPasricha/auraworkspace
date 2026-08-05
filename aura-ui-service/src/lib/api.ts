@@ -82,7 +82,8 @@ export async function checkHealth(): Promise<{ status: string }> {
 export async function sendMessage(
   message: string,
   userId?: string,
-  threadId: string = "thread_demo_001"
+  threadId: string = "thread_demo_001",
+  docContext?: any
 ): Promise<any> {
   const token = typeof window !== "undefined" ? localStorage.getItem("aura_token") : null;
   const storedUserId = typeof window !== "undefined" ? localStorage.getItem("aura_user_id") : null;
@@ -94,11 +95,13 @@ export async function sendMessage(
     headers: {
       "Content-Type": "application/json",
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      "X-User-ID": resolvedUserId,
     },
     body: JSON.stringify({
       message,
       user_id: resolvedUserId,
       thread_id: threadId,
+      doc_context: docContext,
     }),
   });
 
@@ -152,17 +155,45 @@ export async function getUserMemoryProfile(userId: string): Promise<UserMemoryPr
 
 /**
  * Sends a human approval or rejection decision to resume an interrupted LangGraph workflow.
+ * Supports both function signatures (passing a tuple (threadId, approved) or a ResumePayload object).
  */
-export async function resumeChat(payload: ResumePayload): Promise<ResumeResponse> {
+export async function resumeChat(
+  threadIdOrPayload: string | ResumePayload,
+  approvedFlag?: boolean
+): Promise<ResumeResponse> {
   const token = typeof window !== "undefined" ? localStorage.getItem("aura_token") : null;
+  const storedUserId = typeof window !== "undefined" ? localStorage.getItem("aura_user_id") : null;
+
+  let thread_id: string;
+  let approved: boolean;
+
+  if (typeof threadIdOrPayload === "object") {
+    thread_id = threadIdOrPayload.thread_id;
+    approved = threadIdOrPayload.approved;
+  } else {
+    thread_id = threadIdOrPayload;
+    approved = approvedFlag ?? true;
+  }
+
+  const resolvedUserId = storedUserId || "02b7cfb6-f0b2-4d6e-a87b-0b85d4af5fb6";
+
+  // Exact payload contract expected by FastAPI /chat/resume
+  const requestBody = {
+    thread_id,
+    resume_payload: {
+      approved,
+      user_id: resolvedUserId,
+    },
+  };
 
   const response = await fetch(`${API_BASE_URL}/chat/resume`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      "X-User-ID": resolvedUserId,
     },
-    body: JSON.stringify(payload),
+    body: JSON.stringify(requestBody),
   });
 
   if (!response.ok) {
@@ -204,5 +235,6 @@ export const api = {
   loginUser,
   getUserMemoryProfile,
   resumeChat,
+  resumeWorkflow: resumeChat, // Alias so both api.resumeChat and api.resumeWorkflow work seamlessly!
   connectSmitheryAccount,
 };

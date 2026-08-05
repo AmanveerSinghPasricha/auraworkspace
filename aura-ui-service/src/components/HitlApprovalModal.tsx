@@ -1,108 +1,175 @@
-"use client";
+'use client';
 
-import React, { useState } from "react";
-
-interface HitlInterruptData {
-  action_type: string;
-  recipient: string;
-  subject: string;
-  body: string;
-  message?: string;
-}
+import React, { useState } from 'react';
 
 interface HitlApprovalModalProps {
   isOpen: boolean;
   threadId: string;
-  data: HitlInterruptData | null;
-  apiBaseUrl?: string;
-  onClose: () => void;
+  data: any;
+  onClose: (resumedText?: string) => void;
 }
 
-export const HitlApprovalModal: React.FC<HitlApprovalModalProps> = ({
+export default function HitlApprovalModal({
   isOpen,
   threadId,
   data,
-  apiBaseUrl = "http://localhost:8000",
   onClose,
-}) => {
-  const [submitting, setSubmitting] = useState<boolean>(false);
+}: HitlApprovalModalProps) {
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   if (!isOpen || !data) return null;
 
-  const handleDecision = async (approved: boolean) => {
+  const handleApprove = async () => {
+    setIsSubmitting(true);
     try {
-      setSubmitting(true);
-      const response = await fetch(`${apiBaseUrl}/api/v1/chat/resume`, {
+      const BASE_HOST =
+        process.env.NEXT_PUBLIC_API_BASE_URL ||
+        process.env.NEXT_PUBLIC_API_URL ||
+        "http://127.0.0.1:8000";
+
+      const API_BASE_URL = BASE_HOST.endsWith("/api/v1")
+        ? BASE_HOST
+        : `${BASE_HOST.replace(/\/$/, "")}/api/v1`;
+
+      const token = typeof window !== "undefined" ? localStorage.getItem("aura_token") : null;
+      const storedUserId = typeof window !== "undefined" ? localStorage.getItem("aura_user_id") : null;
+      const resolvedUserId = storedUserId || "02b7cfb6-f0b2-4d6e-a87b-0b85d4af5fb6";
+
+      // Direct, standalone API request to resume workflow
+      const response = await fetch(`${API_BASE_URL}/chat/resume`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          "X-User-ID": resolvedUserId,
+        },
         body: JSON.stringify({
-          thread_id: threadId,
-          resume_payload: { approved },
+          thread_id: threadId || "thread_demo_001",
+          resume_payload: {
+            approved: true,
+            user_id: resolvedUserId,
+          },
         }),
       });
 
       if (!response.ok) {
-        throw new Error("Failed to resume execution.");
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || `Server error: ${response.status}`);
       }
 
-      onClose();
-    } catch (err) {
-      console.error("HITL resume error:", err);
+      const res = await response.json();
+      const responseText = res?.response || res?.message || '✅ Action processed successfully.';
+
+      onClose(responseText);
+    } catch (err: any) {
+      console.error('Modal resume execution failed:', err);
+      onClose(
+        typeof err?.message === 'string'
+          ? `❌ Error: ${err.message}`
+          : '❌ Failed to complete action. Gateway error.'
+      );
     } finally {
-      setSubmitting(false);
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleReject = async () => {
+    setIsSubmitting(true);
+    try {
+      const BASE_HOST =
+        process.env.NEXT_PUBLIC_API_BASE_URL ||
+        process.env.NEXT_PUBLIC_API_URL ||
+        "http://127.0.0.1:8000";
+
+      const API_BASE_URL = BASE_HOST.endsWith("/api/v1")
+        ? BASE_HOST
+        : `${BASE_HOST.replace(/\/$/, "")}/api/v1`;
+
+      const token = typeof window !== "undefined" ? localStorage.getItem("aura_token") : null;
+
+      await fetch(`${API_BASE_URL}/chat/resume`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({
+          thread_id: threadId || "thread_demo_001",
+          resume_payload: {
+            approved: false,
+          },
+        }),
+      });
+
+      onClose('Email action was cancelled by user.');
+    } catch {
+      onClose('Email action was cancelled by user.');
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-      <div className="w-full max-w-lg rounded-xl bg-white p-6 shadow-2xl border border-gray-200 dark:bg-slate-900 dark:border-slate-800">
-        <div className="flex items-center justify-between border-b pb-3 border-gray-100 dark:border-slate-800">
-          <h3 className="text-lg font-semibold text-gray-900 dark:text-white flex items-center gap-2">
-            ⚠️ Action Approval Required
-          </h3>
-          <span className="text-xs uppercase px-2 py-1 bg-amber-100 text-amber-800 rounded font-bold dark:bg-amber-900/40 dark:text-amber-300">
-            {data.action_type}
-          </span>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 max-w-md w-full shadow-2xl space-y-4">
+        <div className="flex items-center gap-2 text-amber-400 font-semibold text-sm">
+          <span>⚠️</span> Action Authorization Required
         </div>
 
-        <div className="mt-4 space-y-3 text-sm text-gray-700 dark:text-slate-300">
-          <div>
-            <span className="font-semibold block text-xs uppercase text-gray-400">To:</span>
-            <p className="p-2 bg-gray-50 rounded dark:bg-slate-800 font-mono text-xs">{data.recipient}</p>
-          </div>
+        <p className="text-xs text-slate-300">
+          The agent is requesting approval to perform the following action:
+        </p>
 
+        {/* Staged Action Details */}
+        <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-800/80 space-y-2 text-xs font-mono">
           <div>
-            <span className="font-semibold block text-xs uppercase text-gray-400">Subject:</span>
-            <p className="p-2 bg-gray-50 rounded dark:bg-slate-800 font-medium">{data.subject}</p>
+            <span className="text-slate-500">Action:</span>{' '}
+            <span className="text-indigo-400 font-semibold">
+              {data.action_type || 'send_email'}
+            </span>
           </div>
-
-          <div>
-            <span className="font-semibold block text-xs uppercase text-gray-400">Body Preview:</span>
-            <div className="p-3 bg-gray-50 rounded dark:bg-slate-800 max-h-40 overflow-y-auto whitespace-pre-wrap text-xs">
-              {data.body}
+          {data.recipient && (
+            <div>
+              <span className="text-slate-500">To:</span>{' '}
+              <span className="text-slate-200">{data.recipient}</span>
             </div>
-          </div>
+          )}
+          {data.subject && (
+            <div>
+              <span className="text-slate-500">Subject:</span>{' '}
+              <span className="text-slate-200">{data.subject}</span>
+            </div>
+          )}
+          {data.body && (
+            <div>
+              <span className="text-slate-500">Body:</span>
+              <p className="text-slate-300 font-sans mt-1 p-2 bg-slate-900 rounded border border-slate-800/50 whitespace-pre-wrap max-h-32 overflow-y-auto">
+                {data.body}
+              </p>
+            </div>
+          )}
         </div>
 
-        <div className="mt-6 flex justify-end gap-3 pt-3 border-t border-gray-100 dark:border-slate-800">
+        {/* Action Buttons */}
+        <div className="flex justify-end gap-3 pt-2">
           <button
-            onClick={() => handleDecision(false)}
-            disabled={submitting}
-            className="px-4 py-2 text-sm font-medium rounded-lg text-gray-700 bg-gray-100 hover:bg-gray-200 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
+            type="button"
+            onClick={handleReject}
+            disabled={isSubmitting}
+            className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium transition-colors disabled:opacity-50"
           >
-            Reject
+            Cancel
           </button>
           <button
-            onClick={() => handleDecision(true)}
-            disabled={submitting}
-            className="px-4 py-2 text-sm font-medium rounded-lg text-white bg-green-600 hover:bg-green-700 disabled:opacity-50"
+            type="button"
+            onClick={handleApprove}
+            disabled={isSubmitting}
+            className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium transition-colors disabled:opacity-50 flex items-center gap-1.5"
           >
-            {submitting ? "Sending..." : "Approve & Send"}
+            {isSubmitting ? 'Dispatching...' : 'Approve & Send'}
           </button>
         </div>
       </div>
     </div>
   );
-};
-
-export default HitlApprovalModal;
+}

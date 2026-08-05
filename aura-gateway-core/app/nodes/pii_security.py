@@ -29,12 +29,24 @@ nlp_engine = provider.create_engine()
 analyzer_engine = AnalyzerEngine(nlp_engine=nlp_engine)
 anonymizer_engine = AnonymizerEngine()
 
+# Target entities to redact (EMAIL_ADDRESS is intentionally excluded so EMAIL_AGENT gets intact target recipients)
+ALLOWED_PII_ENTITIES = [
+    "PHONE_NUMBER",
+    "CREDIT_CARD",
+    "US_SSN",
+    "IP_ADDRESS",
+    "IBAN_CODE",
+    "PERSON",
+    "LOCATION",
+    "ORGANIZATION",
+    # "EMAIL_ADDRESS"  # <-- Excluded to allow active email workflows to function properly
+]
+
 
 async def pii_redaction_node(state: GraphState) -> Dict[str, Any]:
     """
     Pre-Graph Middleware Node using Microsoft Presidio.
-    Analyzes incoming HumanMessage, redacts sensitive PII entities (Names, Emails,
-    Phone Numbers, Credit Cards, SSNs), and updates graph state cleanly.
+    Analyzes incoming HumanMessage, redacts sensitive PII entities, and updates graph state cleanly.
     """
     logger.info("🛡️ [PII GUARDRAIL] Running Presidio Engine...")
 
@@ -50,10 +62,11 @@ async def pii_redaction_node(state: GraphState) -> Dict[str, Any]:
 
     raw_text = str(latest_msg.content)
 
-    # 1. Analyze for PII entities
+    # 1. Analyze for specific PII entities (excluding EMAIL_ADDRESS)
     analyzer_results = analyzer_engine.analyze(
         text=raw_text,
         language="en",
+        entities=ALLOWED_PII_ENTITIES,
     )
 
     if not analyzer_results:

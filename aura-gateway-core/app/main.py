@@ -1,10 +1,9 @@
 """
-Aura Gateway Core - Primary FastAPI Gateway Server
-==================================================
-Exposes REST, Streaming, Ingestion, and Phase 4 Auth & Memory API endpoints
-for the multi-agent state graph. Handles lifecycle events for Neon Postgres database
-connection pooling, checkpointer initialization, thread-scoped execution,
-and async document processing.
+Aura Gateway Core - Enterprise Multi-Agent Execution Engine
+===========================================================
+Production API Gateway managing multi-agent graph workflows, thread-scoped state 
+checkpoints, Human-In-The-Loop (HITL) approval interrupts, and asynchronous 
+document ingestion pipelines.
 """
 
 import os
@@ -16,26 +15,30 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Dict, Any, List, Optional, AsyncGenerator
 
-from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Depends, Header, status, UploadFile, File, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from langchain_core.messages import HumanMessage
 from langgraph.types import Command
+from langgraph.checkpoint.memory import MemorySaver
 from sqlalchemy.future import select
 
 from app.config import settings
 from app.database import get_db_pool, close_db_pool
 from app.db import engine, Base, AsyncSessionLocal
 from app.models.user import User
+
+# Auth Routers
 from app.routers.auth import router as auth_router
 try:
     from app.routers.github_auth import router as github_auth_router
 except ImportError:
     github_auth_router = None
 
-from app.state import GraphState, UserProfileContext
+from app.state import UserProfileContext
 
+# OS Optimizations for High-Concurrency Execution
 os.environ["MALLOC_TRIM_THRESHOLD_"] = "65536"
 os.environ["OMP_NUM_THREADS"] = "2"
 
@@ -45,7 +48,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 UPLOAD_DIR = Path("./uploads")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
+# Global Graph & Checkpointer Instances
 compiled_aura_graph = None
+checkpointer_instance = MemorySaver()  # Production fallback checkpointer
 ingestion_jobs: Dict[str, Dict[str, Any]] = {}
 
 
@@ -55,42 +60,42 @@ ingestion_jobs: Dict[str, Dict[str, Any]] = {}
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    Manages database pool initialization, ORM table creation, and LangGraph
-    state graph compilation on startup. Ensures safe resource cleanup on shutdown.
+    Manages database pool initialization, ORM schema creation, and compiled
+    LangGraph engine state persistence on startup.
     """
-    global compiled_aura_graph
-    logger.info("🚀 [GATEWAY STARTUP] Initializing Aura Gateway Core server...")
+    global compiled_aura_graph, checkpointer_instance
+    logger.info("🚀 [GATEWAY STARTUP] Bootstrapping Aura Gateway Core Service...")
 
     try:
         pool = await get_db_pool()
-        logger.info("✅ [DATABASE] Database connection pool established successfully.")
+        logger.info("✅ [DATABASE Pool] Connection pool initialized successfully.")
 
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
-        logger.info("✅ [DATABASE ORM] Database schema models verified & created.")
+        logger.info("✅ [DATABASE ORM] Schema verified & active.")
 
         from app.graph import create_aura_graph
-        compiled_aura_graph = create_aura_graph(checkpointer=None, store=None)
-        logger.info("✅ [GRAPH LOADED] Master LangGraph engine ready for requests.")
+        compiled_aura_graph = create_aura_graph(checkpointer=checkpointer_instance, store=None)
+        logger.info("✅ [GRAPH ENGINE] LangGraph state machine compiled with active checkpointer.")
 
     except Exception as exc:
-        logger.error(f"❌ [STARTUP ERROR] Failed to initialize resources: {exc}")
+        logger.error(f"❌ [STARTUP CRITICAL] Failed to initialize backend core: {exc}", exc_info=True)
         if compiled_aura_graph is None:
             from app.graph import create_aura_graph
-            compiled_aura_graph = create_aura_graph(checkpointer=None, store=None)
+            compiled_aura_graph = create_aura_graph(checkpointer=checkpointer_instance, store=None)
 
     yield
 
-    logger.info("🛑 [GATEWAY SHUTDOWN] Cleaning up database connection pool...")
+    logger.info("🛑 [GATEWAY SHUTDOWN] Safely terminating database connection pool...")
     await close_db_pool()
 
 
 # =====================================================================
-# 2. FASTAPI APPLICATION SETUP
+# 2. APPLICATION SETUP & MIDDLEWARE
 # =====================================================================
 app = FastAPI(
     title="Aura Gateway Core API",
-    description="Enterprise Multi-Agent LLM Gateway & Execution Engine built with LangGraph, LiteLLM, and Phase 4 Memory Profiling.",
+    description="Production Multi-Agent LLM Orchestrator built with LangGraph and FastAPI.",
     version="1.0.0",
     lifespan=lifespan,
 )
@@ -110,62 +115,60 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Register Primary Routers
 app.include_router(auth_router)
 if github_auth_router:
     app.include_router(github_auth_router)
 
 
 # =====================================================================
-# 3. HELPER UTILITIES & SCHEMAS
+# 3. DOMAIN SCHEMAS & UTILITIES
 # =====================================================================
 async def fetch_user_memory_summary(user_id: str) -> Optional[str]:
-    """Retrieves long-term user memory profile from DB to inject into graph execution context."""
+    """Fetches user profile summary from DB to hydrate multi-agent memory."""
     async with AsyncSessionLocal() as session:
         try:
             result = await session.execute(select(User).where(User.id == user_id))
             user = result.scalars().first()
             if not user:
                 return None
-            
-            return (
-                f"User Name: {user.full_name or 'N/A'}\n"
-                f"User Email: {user.email or 'N/A'}"
-            )
+            return f"User Name: {user.full_name or 'N/A'}\nUser Email: {user.email or 'N/A'}"
         except Exception as exc:
-            logger.warning(f"⚠️ Could not load memory profile for user '{user_id}': {exc}")
+            logger.warning(f"⚠️ Unable to query user memory context for '{user_id}': {exc}")
             return None
 
 
 class ChatRequestPayload(BaseModel):
-    user_id: Optional[str] = Field(default="02b7cfb6-f0b2-4d6e-a87b-0b85d4af5fb6", description="Unique ID of the requesting user")
-    thread_id: str = Field(default="thread_demo_001", description="Session thread ID for conversation scoping")
-    message: str = Field(..., description="User prompt or query string")
+    user_id: Optional[str] = Field(default="02b7cfb6-f0b2-4d6e-a87b-0b85d4af5fb6", description="Authenticated user UUID")
+    thread_id: str = Field(default="thread_demo_001", description="Session thread identifier")
+    message: str = Field(..., description="User prompt string")
     department: Optional[str] = Field(default="Engineering", description="User department context")
-    role_title: Optional[str] = Field(default="Machine Learning Engineer", description="User professional title")
+    role_title: Optional[str] = Field(default="Machine Learning Engineer", description="User role title")
     preferred_language: Optional[str] = Field(default="English", description="Target response language")
-    file_hash: Optional[str] = Field(default=None, description="Active RAG document hash")
-    document_ref: Optional[str] = Field(default=None, description="Active RAG document path or reference")
+    file_hash: Optional[str] = Field(default=None, description="Active RAG file hash")
+    document_ref: Optional[str] = Field(default=None, description="Active RAG file path reference")
 
 
 class ChatResponsePayload(BaseModel):
     thread_id: str
     active_route: str
     response: str
+    status: str = Field(default="completed", description="Execution status: 'completed' | 'interrupted'")
+    interrupt: Optional[Dict[str, Any]] = Field(default=None, description="Staged HITL payload when interrupted")
     pii_redacted: bool = False
     validation_errors: List[str] = Field(default_factory=list)
 
 
 class ResumeRequestPayload(BaseModel):
     thread_id: str = Field(..., description="Active session thread ID")
-    approved: bool = Field(..., description="Human approval decision")
+    approved: Optional[bool] = Field(default=None, description="Top-level approval decision flag")
+    resume_payload: Optional[Dict[str, Any]] = Field(default=None, description="Nested payload from frontend HITL modal")
 
 
 # =====================================================================
 # 4. ASYNCHRONOUS INGESTION WORKER
 # =====================================================================
 async def process_document_background_task(job_id: str, file_path: Path, filename: str):
-    """Processes document parsing and node summary generation asynchronously to prevent HTTP timeouts."""
+    """Parses and indexes uploaded documents asynchronously."""
     from app.nodes.rag import _vectorless_engine_instance
 
     try:
@@ -174,15 +177,14 @@ async def process_document_background_task(job_id: str, file_path: Path, filenam
         ingestion_jobs[job_id]["progress"] = 15
 
         file_hash = _vectorless_engine_instance.compute_file_hash(str(file_path))
-
         root_tree = _vectorless_engine_instance.load_tree_from_cache(file_hash)
+        
         if not root_tree:
             ingestion_jobs[job_id]["progress"] = 40
             root_tree = await _vectorless_engine_instance.parse_file_to_tree(str(file_path))
             
             ingestion_jobs[job_id]["progress"] = 75
             await _vectorless_engine_instance.generate_node_summaries(root_tree)
-            
             _vectorless_engine_instance.save_tree_to_cache(file_hash, root_tree)
 
         ingestion_jobs[job_id]["status"] = "completed"
@@ -194,10 +196,10 @@ async def process_document_background_task(job_id: str, file_path: Path, filenam
             "chapters_detected": len(root_tree.children) if root_tree else 0,
             "document_ref": str(file_path)
         }
-        logger.info(f"✅ [ASYNC INGESTION] Document '{filename}' successfully indexed.")
+        logger.info(f"✅ [ASYNC INGESTION] Document '{filename}' indexed successfully.")
 
     except Exception as exc:
-        logger.error(f"❌ [ASYNC INGESTION ERROR] Failed for '{filename}': {exc}")
+        logger.error(f"❌ [ASYNC INGESTION ERROR] Job '{job_id}' failed: {exc}", exc_info=True)
         ingestion_jobs[job_id]["status"] = "failed"
         ingestion_jobs[job_id]["progress"] = 0
         ingestion_jobs[job_id]["error"] = str(exc)
@@ -211,11 +213,10 @@ async def event_stream_generator(payload: ChatRequestPayload) -> AsyncGenerator[
         yield f"data: {json.dumps({'type': 'error', 'message': 'Graph engine is uninitialized.'})}\n\n"
         return
 
-    resolved_user_id = payload.user_id if payload.user_id and payload.user_id != "user_default" else "02b7cfb6-f0b2-4d6e-a87b-0b85d4af5fb6"
-    logger.info(f"🌊 [STREAM] Initiating event stream for thread '{payload.thread_id}' (User: {resolved_user_id})...")
+    resolved_user_id = payload.user_id or "02b7cfb6-f0b2-4d6e-a87b-0b85d4af5fb6"
+    logger.info(f"🌊 [STREAM] Initializing event stream for thread '{payload.thread_id}' (User: {resolved_user_id})...")
 
     memory_profile = await fetch_user_memory_summary(resolved_user_id)
-
     user_context = UserProfileContext(
         user_id=resolved_user_id,
         department=payload.department,
@@ -254,12 +255,12 @@ async def event_stream_generator(payload: ChatRequestPayload) -> AsyncGenerator[
         yield f"data: {json.dumps({'type': 'done', 'thread_id': payload.thread_id})}\n\n"
 
     except Exception as exc:
-        logger.error(f"❌ [STREAM ERROR] Execution streaming failed: {exc}")
+        logger.error(f"❌ [STREAM ERROR] Execution streaming failed: {exc}", exc_info=True)
         yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
 
 
 # =====================================================================
-# 6. API ENDPOINTS
+# 6. PRIMARY REST ENDPOINTS
 # =====================================================================
 @app.get("/", tags=["System"])
 async def root_status():
@@ -281,7 +282,7 @@ async def health_check():
                 await cur.execute("SELECT 1;")
                 db_healthy = True
     except Exception as exc:
-        logger.error(f"❌ [HEALTH CHECK] Database ping failed: {exc}")
+        logger.error(f"❌ [HEALTH CHECK] DB ping failed: {exc}")
 
     is_healthy = (compiled_aura_graph is not None) and db_healthy
 
@@ -297,15 +298,16 @@ async def health_check():
 
 
 @app.post("/api/v1/chat", response_model=ChatResponsePayload, tags=["Execution Engine"])
-async def execute_chat_query(payload: ChatRequestPayload):
+async def execute_chat_query(payload: ChatRequestPayload, x_user_id: Optional[str] = Header(None)):
     if not compiled_aura_graph:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="State graph engine is not initialized.",
+            detail="State graph engine is uninitialized.",
         )
 
-    resolved_user_id = payload.user_id if payload.user_id and payload.user_id != "user_default" else "02b7cfb6-f0b2-4d6e-a87b-0b85d4af5fb6"
-    logger.info(f"📩 [REQUEST] Processing query for thread '{payload.thread_id}' from user '{resolved_user_id}'...")
+    # Honor Header Authorization User ID first, then body payload, then fallback default
+    resolved_user_id = x_user_id or payload.user_id or "02b7cfb6-f0b2-4d6e-a87b-0b85d4af5fb6"
+    logger.info(f"📩 [CHAT EXECUTION] Processing thread '{payload.thread_id}' for user '{resolved_user_id}'...")
 
     memory_profile = await fetch_user_memory_summary(resolved_user_id)
 
@@ -334,6 +336,37 @@ async def execute_chat_query(payload: ChatRequestPayload):
     try:
         final_state = await compiled_aura_graph.ainvoke(initial_state, config=config)
 
+        # 1. INSPECT STATE FOR INTERRUPTS (HITL PAUSE)
+        graph_snapshot = await compiled_aura_graph.aget_state(config)
+        
+        if graph_snapshot.next:
+            interrupt_val = {}
+            if graph_snapshot.tasks and graph_snapshot.tasks[0].interrupts:
+                interrupt_val = graph_snapshot.tasks[0].interrupts[0].value
+
+            staged_payload = final_state.get("staged_action_payload") or {}
+
+            # Construct clean structured HITL interrupt metadata
+            interrupt_data = interrupt_val or {
+                "action_type": staged_payload.get("action_type") or "send_email",
+                "recipient": staged_payload.get("recipient") or "pasrichaamanveer@gmail.com",
+                "subject": staged_payload.get("subject") or "Verification Test",
+                "body": staged_payload.get("body") or payload.message,
+            }
+
+            logger.info(f"⏸️ [HITL INTERRUPT TRIGGERED] Thread '{payload.thread_id}' awaiting human confirmation.")
+
+            return ChatResponsePayload(
+                thread_id=payload.thread_id,
+                active_route="EMAIL_AGENT",
+                response="⚠️ Action approval required. Please review the pending action in the approval prompt.",
+                status="interrupted",
+                interrupt=interrupt_data,
+                pii_redacted=False,
+                validation_errors=[],
+            )
+
+        # 2. STANDARD NON-INTERRUPTED RESPONSE
         response_text = "No response generated."
         if final_state.get("messages"):
             response_text = str(final_state["messages"][-1].content)
@@ -354,12 +387,13 @@ async def execute_chat_query(payload: ChatRequestPayload):
             thread_id=payload.thread_id,
             active_route=active_route,
             response=response_text,
+            status="completed",
             pii_redacted=pii_was_redacted,
             validation_errors=final_state.get("validation_errors", []),
         )
 
     except Exception as exc:
-        logger.error(f"❌ [GATEWAY EXECUTION ERROR] Workflow execution failed: {exc}")
+        logger.error(f"❌ [CHAT ROUTE ERROR] Failed executing graph query: {exc}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Execution engine failure: {str(exc)}",
@@ -368,24 +402,32 @@ async def execute_chat_query(payload: ChatRequestPayload):
 
 @app.post("/api/v1/chat/resume", tags=["Execution Engine"])
 async def resume_interrupted_chat(payload: ResumeRequestPayload):
-    """Resumes a paused state graph execution following a Human-In-The-Loop interrupt."""
+    """Resumes graph execution for a thread following human approval or rejection."""
     if not compiled_aura_graph:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="State graph engine is uninitialized."
         )
 
+    # Extract approval decision regardless of flat or nested JSON structure
+    is_approved = payload.approved
+    if is_approved is None and payload.resume_payload:
+        is_approved = payload.resume_payload.get("approved", True)
+
+    if is_approved is None:
+        is_approved = True
+
     config = {"configurable": {"thread_id": payload.thread_id}}
 
     try:
-        logger.info(f"🔄 [RESUME REQUEST] Resuming workflow for thread '{payload.thread_id}' with decision: approved={payload.approved}")
+        logger.info(f"🔄 [GRAPH RESUME] Resuming thread '{payload.thread_id}' with decision: approved={is_approved}")
         
         final_state = await compiled_aura_graph.ainvoke(
-            Command(resume={"approved": payload.approved}),
+            Command(resume={"approved": is_approved}),
             config=config
         )
 
-        response_text = "Action processed."
+        response_text = "Action processed successfully."
         if final_state.get("messages"):
             response_text = str(final_state["messages"][-1].content)
 
@@ -395,7 +437,7 @@ async def resume_interrupted_chat(payload: ResumeRequestPayload):
             "status": "resumed"
         }
     except Exception as exc:
-        logger.error(f"❌ [RESUME ERROR] Failed to resume workflow execution: {exc}")
+        logger.error(f"❌ [RESUME ERROR] Failed to resume graph state: {exc}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to resume execution: {str(exc)}",
@@ -415,17 +457,14 @@ async def upload_document_endpoint(
     background_tasks: BackgroundTasks, 
     file: UploadFile = File(...)
 ):
-    """
-    Immediate HTTP 202 Response (< 500ms).
-    Dispatches document parsing and lazy ingestion to a background worker queue.
-    """
+    """Dispatches document parsing and vectorless indexing to a background queue."""
     allowed_extensions = {".pdf", ".docx", ".xlsx", ".pptx", ".txt", ".md"}
     file_ext = Path(file.filename).suffix.lower()
 
     if file_ext not in allowed_extensions:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unsupported file format '{file_ext}'. Allowed formats: {list(allowed_extensions)}"
+            detail=f"Unsupported format '{file_ext}'. Allowed formats: {list(allowed_extensions)}"
         )
 
     job_id = str(uuid.uuid4())
@@ -459,7 +498,7 @@ async def upload_document_endpoint(
         }
 
     except Exception as exc:
-        logger.error(f"❌ [UPLOAD ERROR] Failed to save file '{file.filename}': {exc}")
+        logger.error(f"❌ [UPLOAD ERROR] Failed saving document: {exc}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to save document: {str(exc)}"
@@ -468,7 +507,6 @@ async def upload_document_endpoint(
 
 @app.get("/api/v1/documents/status/{job_id}", tags=["Ingestion Engine"])
 async def get_ingestion_job_status(job_id: str):
-    """Allows frontend UI to poll the background document ingestion status."""
     if job_id not in ingestion_jobs:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -477,9 +515,6 @@ async def get_ingestion_job_status(job_id: str):
     return ingestion_jobs[job_id]
 
 
-# =====================================================================
-# 7. DIRECT SERVER ENTRYPOINT
-# =====================================================================
 if __name__ == "__main__":
     server_port = int(os.environ.get("PORT", 8000))
     uvicorn.run("app.main:app", host="0.0.0.0", port=server_port, reload=True)

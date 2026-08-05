@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 
 interface ConnectGmailButtonProps {
   userId: string;
@@ -9,59 +9,77 @@ interface ConnectGmailButtonProps {
 
 export const ConnectGmailButton: React.FC<ConnectGmailButtonProps> = ({
   userId,
-  apiBaseUrl = "http://localhost:8000",
+  apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000",
 }) => {
   const [loading, setLoading] = useState<boolean>(false);
   const [isConnected, setIsConnected] = useState<boolean>(false);
 
-  // Handle post-OAuth return callback from query params
+  const handleSaveCallback = useCallback(
+    async (code: string) => {
+      try {
+        setLoading(true);
+        const redirectUri = `${window.location.origin}/auth/gmail/callback`;
+
+        const res = await fetch(`${apiBaseUrl}/api/v1/auth/connect-gmail`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            user_id: userId,
+            code: code,
+            redirect_uri: redirectUri,
+          }),
+        });
+
+        if (res.ok) {
+          setIsConnected(true);
+          window.history.replaceState({}, document.title, window.location.pathname);
+        } else {
+          console.error("Failed to persist Gmail connection.");
+        }
+      } catch (err) {
+        console.error("Failed to connect Gmail account:", err);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [apiBaseUrl, userId]
+  );
+
   useEffect(() => {
     const urlParams = new URLSearchParams(window.location.search);
-    const connectionId = urlParams.get("connection_id");
+    const code = urlParams.get("code");
 
-    if (connectionId && userId) {
-      handleSaveCallback(connectionId);
+    if (code && userId) {
+      handleSaveCallback(code);
     }
-  }, [userId]);
+  }, [userId, handleSaveCallback]);
 
-  const handleSaveCallback = async (connectionId: str) => {
+  const handleConnect = () => {
     try {
       setLoading(true);
-      const res = await fetch(`${apiBaseUrl}/api/v1/integrations/gmail/callback`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          user_id: userId,
-          connection_id: connectionId,
-        }),
-      });
+      const clientId = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID;
 
-      if (res.ok) {
-        setIsConnected(true);
-        // Clean URL query parameters
-        window.history.replaceState({}, document.title, window.location.pathname);
+      if (!clientId) {
+        alert("Google Client ID is missing in frontend configuration.");
+        setLoading(false);
+        return;
       }
-    } catch (err) {
-      console.error("Failed to save Smithery connection ID:", err);
-    } finally {
-      setLoading(false);
-    }
-  };
 
-  const handleConnect = async () => {
-    try {
-      setLoading(true);
-      const res = await fetch(
-        `${apiBaseUrl}/api/v1/integrations/gmail/connect-url?user_id=${userId}`
-      );
-      
-      if (!res.ok) throw new Error("Failed to fetch connection URL");
-      
-      const data = await res.json();
-      // Redirect user to Smithery Hosted Dynamic OAuth
-      window.location.href = data.connect_url;
+      const redirectUri = `${window.location.origin}/auth/gmail/callback`;
+      const scope = "https://www.googleapis.com/auth/gmail.send";
+
+      const googleAuthUrl =
+        `https://accounts.google.com/o/oauth2/v2/auth?` +
+        `client_id=${encodeURIComponent(clientId)}` +
+        `&redirect_uri=${encodeURIComponent(redirectUri)}` +
+        `&response_type=code` +
+        `&scope=${encodeURIComponent(scope)}` +
+        `&access_type=offline` +
+        `&prompt=consent`;
+
+      window.location.href = googleAuthUrl;
     } catch (err) {
-      console.error("Connection error:", err);
+      console.error("OAuth flow start error:", err);
       setLoading(false);
     }
   };
@@ -70,10 +88,10 @@ export const ConnectGmailButton: React.FC<ConnectGmailButtonProps> = ({
     <button
       onClick={handleConnect}
       disabled={loading || isConnected}
-      className={`px-4 py-2 rounded-lg font-medium transition-colors flex items-center gap-2 ${
+      className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-all flex items-center gap-1.5 shadow-sm ${
         isConnected
-          ? "bg-green-600 text-white cursor-default"
-          : "bg-blue-600 hover:bg-blue-700 text-white disabled:bg-gray-400"
+          ? "bg-emerald-950 text-emerald-400 border border-emerald-800 cursor-default"
+          : "bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-50"
       }`}
     >
       {loading ? (
@@ -81,7 +99,7 @@ export const ConnectGmailButton: React.FC<ConnectGmailButtonProps> = ({
       ) : isConnected ? (
         <span>✓ Gmail Connected</span>
       ) : (
-        <span>Connect Gmail</span>
+        <span>✉️ Connect Gmail</span>
       )}
     </button>
   );

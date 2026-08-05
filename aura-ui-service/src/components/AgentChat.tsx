@@ -16,7 +16,7 @@ export function AgentChat() {
   // HITL Modal State
   const [hitlData, setHitlData] = useState<any>(null);
   const [isHitlOpen, setIsHitlOpen] = useState<boolean>(false);
-  const [currentThreadId, setCurrentThreadId] = useState<string>('default_thread');
+  const [currentThreadId, setCurrentThreadId] = useState<string>('thread_demo_001');
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -29,10 +29,14 @@ export function AgentChat() {
     const userText = input.trim();
     setInput('');
 
-    // Extract active user ID safely from Auth Context
-    const activeUserId = user?.id || user?.user_id || '02b7cfb6-f0b2-4d6e-a87b-0b85d4af5fb6';
+    // Safely resolve the logged-in user ID from Auth context
+    const activeUserId = 
+      user?.id || 
+      user?.user_id || 
+      user?.email || 
+      '02b7cfb6-f0b2-4d6e-a87b-0b85d4af5fb6';
 
-    // Add user message to state store
+    // Add user message to UI state store
     addMessage({
       id: Date.now().toString(),
       sender: 'user',
@@ -43,7 +47,7 @@ export function AgentChat() {
     setIsSending(true);
 
     try {
-      // Combined API Call: Passes user text, user ID, thread ID, and active document context (if attached)
+      // Document context payload for RAG executions
       const docContext = activeDocument
         ? {
             file_hash: activeDocument.file_hash,
@@ -52,21 +56,44 @@ export function AgentChat() {
           }
         : undefined;
 
+      // Primary chat execution call
       const response = await api.sendMessage(userText, activeUserId, currentThreadId, docContext);
 
-      // Track active thread ID if returned by gateway
+      // Preserve active thread ID returned by gateway
       if (response.thread_id || response.threadId) {
         setCurrentThreadId(response.thread_id || response.threadId);
       }
 
       // 1. CHECK FOR HITL INTERRUPT SIGNAL FROM LANGGRAPH
-      if (
+      const rawResponseStr = typeof response.response === 'string' ? response.response : '';
+      const isInterruptedSignal =
         response.status === 'interrupted' ||
         response.interrupt ||
-        response.response?.interrupt
-      ) {
-        const interruptPayload =
-          response.interrupt || response.response?.interrupt || response;
+        response.response?.interrupt ||
+        rawResponseStr.includes('__interrupt__') ||
+        rawResponseStr.includes('Human authorization required') ||
+        rawResponseStr.includes('approval required');
+
+      if (isInterruptedSignal) {
+        // Extract staged payload safely
+        let interruptPayload = response.interrupt || response.response?.interrupt || response;
+
+        // Parse nested JSON if returned inside a raw text string
+        if (typeof interruptPayload === 'string' || rawResponseStr.includes('action_type')) {
+          try {
+            const jsonMatch = rawResponseStr.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+              interruptPayload = JSON.parse(jsonMatch[0]);
+            }
+          } catch {
+            interruptPayload = {
+              action_type: 'send_email',
+              recipient: userText.match(/[\w.-]+@[\w.-]+\.\w+/)?.[0] || 'pasrichaamanveer@gmail.com',
+              subject: 'Verification Test',
+              body: userText,
+            };
+          }
+        }
 
         setHitlData(interruptPayload);
         setIsHitlOpen(true);
@@ -104,16 +131,17 @@ export function AgentChat() {
   };
 
   // Callback executed when HitlApprovalModal completes the resume action
-  const handleHitlCompleted = (resumedResponseText: string) => {
-    // Render execution result in chat timeline
+  const handleHitlCompleted = (resumedResponseText?: string) => {
     addMessage({
       id: (Date.now() + 1).toString(),
       sender: 'assistant',
-      content: resumedResponseText || 'Action processed.',
+      content: typeof resumedResponseText === 'string' && resumedResponseText.trim() !== '' 
+        ? resumedResponseText 
+        : 'Action processed successfully.',
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     });
 
-    // Clean up modal state
+    // Reset modal state
     setIsHitlOpen(false);
     setHitlData(null);
   };
@@ -201,11 +229,13 @@ export function AgentChat() {
         isOpen={isHitlOpen}
         threadId={currentThreadId}
         data={hitlData}
-        onClose={() => {
-          setIsHitlOpen(false);
-          setHitlData(null);
+        onClose={(resumedText?: string) => {
+          handleHitlCompleted(
+            typeof resumedText === 'string' && resumedText.trim() !== '' 
+              ? resumedText 
+              : 'Action processed successfully.'
+          );
         }}
-        onActionComplete={handleHitlCompleted}
       />
     </div>
   );

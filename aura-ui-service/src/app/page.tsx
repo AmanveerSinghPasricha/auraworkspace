@@ -8,6 +8,7 @@ import { api } from '../hooks/useApi';
 import { DocumentUpload } from '../components/DocumentUpload';
 import { AgentChat } from '../components/AgentChat';
 import { GithubConnectButton } from '../components/GithubConnectButton';
+import { ConnectGmailButton } from '../components/ConnectGmailButton';
 
 export default function Home() {
   const { user, isLoading, logout } = useAuth();
@@ -82,7 +83,8 @@ export default function Home() {
             </span>
           </div>
 
-          {/* Single, Official GitHub OAuth Connection Button */}
+          {/* Integration OAuth Connection Buttons */}
+          <ConnectGmailButton userId={activeUserId} />
           <GithubConnectButton userId={activeUserId} />
 
           {/* User Profile & Logout */}

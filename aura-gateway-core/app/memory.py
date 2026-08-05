@@ -8,7 +8,7 @@ and Short-Term Memory (Sliding Window Trimming + Recursive Summarization).
 import json
 import logging
 from typing import Any, Dict, List, Optional, Tuple
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from langgraph.store.base import BaseStore
 from langchain_core.messages import (
     BaseMessage,
@@ -38,8 +38,7 @@ class UserProfileMemory(BaseModel):
     domain_facts: List[str] = Field(default_factory=list)
     explicit_instructions: List[str] = Field(default_factory=list)
 
-    class Config:
-        extra = "ignore"
+    model_config = ConfigDict(extra="ignore")
 
     def to_system_prompt_block(self) -> str:
         """Formats long-term memory into an XML block for LLM compliance."""
@@ -74,7 +73,7 @@ async def get_user_long_term_memory(store: BaseStore, user_id: str) -> UserProfi
         if item and item.value:
             return UserProfileMemory(**item.value)
     except Exception as err:
-        logger.warning(f"?? [LONG-TERM MEMORY] Failed to fetch profile for user {user_id}: {err}")
+        logger.warning(f"⚠️ [LONG-TERM MEMORY] Failed to fetch profile for user {user_id}: {err}")
 
     return UserProfileMemory(user_id=user_id)
 
@@ -89,7 +88,7 @@ async def save_user_profile(store: BaseStore, user_id: str, profile: UserProfile
         key=key,
         value=profile.model_dump()
     )
-    logger.info(f"?? [LONG-TERM MEMORY] Saved profile for user '{user_id}'.")
+    logger.info(f"💾 [LONG-TERM MEMORY] Saved profile for user '{user_id}'.")
 
 
 # =====================================================================
@@ -148,10 +147,10 @@ async def reconcile_and_save_facts(
 
         profile.domain_facts = consolidated
         await save_user_profile(store, user_id, profile)
-        logger.info(f"?? [MEMORY DEDUPLICATION] Reconciled facts for user '{user_id}'. Count: {len(consolidated)}")
+        logger.info(f"🧠 [MEMORY DEDUPLICATION] Reconciled facts for user '{user_id}'. Count: {len(consolidated)}")
 
     except Exception as exc:
-        logger.error(f"? [DEDUPLICATION ERROR] Failed to reconcile facts: {exc}")
+        logger.error(f"❌ [DEDUPLICATION ERROR] Failed to reconcile facts: {exc}")
 
 
 MEMORY_EXTRACTION_PROMPT = """Analyze the following conversation turn between a User and Assistant.
@@ -214,7 +213,7 @@ async def extract_and_update_memory(
             await reconcile_and_save_facts(store, user_id, new_facts)
 
     except Exception as exc:
-        logger.error(f"? [MEMORY EXTRACTION ERROR] Failed to extract facts: {exc}")
+        logger.error(f"❌ [MEMORY EXTRACTION ERROR] Failed to extract facts: {exc}")
 
 
 # =====================================================================
@@ -292,13 +291,13 @@ Updated Running Summary:"""
         )
 
         updated_summary = response.choices[0].message.content.strip()
-        logger.info("?? [SHORT-TERM MEMORY] Successfully compressed older turns into running summary.")
+        logger.info("🧠 [SHORT-TERM MEMORY] Successfully compressed older turns into running summary.")
 
         system_msgs = [m for m in messages if isinstance(m, SystemMessage)]
         return updated_summary, system_msgs + recent_turns
 
     except Exception as exc:
-        logger.error(f"? [SHORT-TERM MEMORY ERROR] Summarization failed: {exc}")
+        logger.error(f"❌ [SHORT-TERM MEMORY ERROR] Summarization failed: {exc}")
         trimmed_fallback = trim_sliding_window(messages, max_messages=SLIDING_WINDOW_MSG_COUNT)
         return existing_summary, trimmed_fallback
 

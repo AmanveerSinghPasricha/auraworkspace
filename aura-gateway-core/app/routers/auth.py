@@ -15,7 +15,6 @@ from app.schemas.auth import (
     TokenResponse,
     UserMemoryProfileResponse
 )
-# Fixed imports to match exact module locations
 from app.security import hash_password, verify_password, create_access_token
 from app.core.security import encrypt_token
 
@@ -25,9 +24,12 @@ router = APIRouter(prefix="/api/v1/auth", tags=["Phase 4: Auth & Integrations"])
 GITHUB_CLIENT_ID = os.getenv("GITHUB_CLIENT_ID", "")
 GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET", "")
 
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
+
 
 # =====================================================================
-# REQUEST & RESPONSE SCHEMAS
+# REQUEST SCHEMAS
 # =====================================================================
 class ConnectSmitheryRequest(BaseModel):
     user_id: str = Field(..., description="Unique ID of the target user in PostgreSQL")
@@ -39,13 +41,18 @@ class ConnectGithubRequest(BaseModel):
     code: str = Field(..., description="Temporary Authorization Code returned by GitHub OAuth")
 
 
+class ConnectGmailRequest(BaseModel):
+    user_id: str = Field(..., description="Unique ID of the target user in PostgreSQL")
+    code: str = Field(..., description="Temporary Authorization Code returned by Google OAuth")
+    redirect_uri: str = Field(..., description="OAuth Redirect URI matching Google Console configuration")
+
+
 # =====================================================================
-# AUTHENTICATION & CONNECTION ENDPOINTS
+# AUTHENTICATION ENDPOINTS
 # =====================================================================
 @router.post("/signup", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
 async def signup(payload: UserSignUpRequest, db: AsyncSession = Depends(get_db)):
-    """Registers a user, hashes their password, and saves their user profile to PostgreSQL."""
-    # 1. Check if user email exists
+    """Registers a user, hashes password, and saves profile to PostgreSQL."""
     result = await db.execute(select(User).where(User.email == payload.email))
     existing_user = result.scalars().first()
     if existing_user:
@@ -54,24 +61,22 @@ async def signup(payload: UserSignUpRequest, db: AsyncSession = Depends(get_db))
             detail="A user with this email address already exists."
         )
 
-    # 2. Hash password & instantiate User matching model schema attributes exactly
     new_user = User(
-        id=str(uuid.uuid4()),  # Assign UUID string for Primary Key
+        id=str(uuid.uuid4()),
         email=payload.email,
         password_hash=hash_password(payload.password),
         full_name=payload.full_name,
         smithery_connection_id=None,
-        github_access_token=None
+        github_access_token=None,
+        google_refresh_token=None
     )
 
-    # 3. Save to database
     db.add(new_user)
     await db.commit()
     await db.refresh(new_user)
 
-    logger.info(f"👤 [AUTH & MEMORY PERSISTED] User '{new_user.id}' created successfully.")
+    logger.info(f"👤 [AUTH] User '{new_user.id}' created successfully.")
 
-    # 4. Generate JWT
     access_token = create_access_token(data={"sub": new_user.id, "email": new_user.email})
 
     return TokenResponse(
@@ -83,14 +88,21 @@ async def signup(payload: UserSignUpRequest, db: AsyncSession = Depends(get_db))
 
 @router.post("/login", response_model=TokenResponse)
 async def login(payload: UserLoginRequest, db: AsyncSession = Depends(get_db)):
-    """Authenticates credentials and returns a signed access token."""
-    result = await db.execute(select(User).where(User.email == payload.email))
-    user = result.scalars().first()
+    """Authenticates credentials and returns a signed JWT access token."""
+    try:
+        result = await db.execute(select(User).where(User.email == payload.email))
+        user = result.scalars().first()
+    except Exception as exc:
+        logger.error(f"❌ [LOGIN DB ERROR] Failed to query user: {exc}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Database query failure during login."
+        )
 
     if not user or not verify_password(payload.password, user.password_hash):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid credentials provided."
+            detail="Invalid email or password."
         )
 
     access_token = create_access_token(data={"sub": user.id, "email": user.email})
@@ -104,7 +116,7 @@ async def login(payload: UserLoginRequest, db: AsyncSession = Depends(get_db)):
 
 @router.get("/memory/profile/{user_id}", response_model=UserMemoryProfileResponse)
 async def get_user_memory_profile(user_id: str, db: AsyncSession = Depends(get_db)):
-    """Retrieves structured user memory profile for state graph contextualization."""
+    """Retrieves structured user memory profile for graph context."""
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalars().first()
 
@@ -120,17 +132,24 @@ async def get_user_memory_profile(user_id: str, db: AsyncSession = Depends(get_d
     return UserMemoryProfileResponse(
         user_id=user.id,
         full_name=full_name_str,
-        email=user.email,
+        role_or_title="",
+        primary_goal="",
+        preferred_tone="Direct & Concise",
+        domain_expertise=[],
+        additional_context="",
         profile_summary=summary
     )
 
 
+# =====================================================================
+# INTEGRATION LINKING ENDPOINTS
+# =====================================================================
 @router.post("/connect-smithery", status_code=status.HTTP_200_OK)
 async def connect_smithery_account(
     payload: ConnectSmitheryRequest,
     db: AsyncSession = Depends(get_db)
 ):
-    """Links a user's authenticated Smithery Gmail connection ID to their PostgreSQL user account."""
+    """Links a user's Smithery connection ID."""
     result = await db.execute(select(User).where(User.id == payload.user_id))
     user = result.scalars().first()
 
@@ -140,18 +159,14 @@ async def connect_smithery_account(
             detail=f"User with ID '{payload.user_id}' not found."
         )
 
-    # Save and commit connection ID
     user.smithery_connection_id = payload.smithery_connection_id
     await db.commit()
     await db.refresh(user)
 
-    logger.info(f"🔗 [SMITHERY OAUTH LINKED] User '{user.id}' bound to connection ID: {payload.smithery_connection_id}")
-
     return {
         "status": "success",
-        "message": "Smithery Gmail connection successfully linked to user account.",
-        "user_id": user.id,
-        "smithery_connection_id": user.smithery_connection_id
+        "message": "Smithery connection linked successfully.",
+        "user_id": user.id
     }
 
 
@@ -160,11 +175,10 @@ async def connect_github_account(
     payload: ConnectGithubRequest,
     db: AsyncSession = Depends(get_db)
 ):
-    """Exchanges OAuth authorization code for GitHub Access Token and encrypts it into PostgreSQL."""
+    """Exchanges OAuth code for GitHub Access Token and encrypts it."""
     result = await db.execute(select(User).where(User.id == payload.user_id))
     user = result.scalars().first()
 
-    # Fallback lookup for default demo UUID if provided user_id is not found
     if not user:
         fallback_res = await db.execute(
             select(User).where(User.id == "02b7cfb6-f0b2-4d6e-a87b-0b85d4af5fb6")
@@ -174,10 +188,9 @@ async def connect_github_account(
     if not user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"User with ID '{payload.user_id}' not found."
+            detail=f"User '{payload.user_id}' not found."
         )
 
-    # Exchange code with GitHub API
     token_url = "https://github.com/login/oauth/access_token"
     headers = {"Accept": "application/json"}
     body = {
@@ -198,15 +211,70 @@ async def connect_github_account(
             error_msg = token_data.get("error_description", "Invalid OAuth authorization code.")
             raise HTTPException(status_code=400, detail=error_msg)
 
-    # Encrypt token and store in user record
     user.github_access_token = encrypt_token(access_token)
     await db.commit()
     await db.refresh(user)
 
-    logger.info(f"🔑 [GITHUB OAUTH LINKED] Encrypted token saved for User '{user.id}'")
-
     return {
         "status": "success",
         "message": "GitHub account successfully linked.",
+        "user_id": user.id
+    }
+
+
+@router.post("/connect-gmail", status_code=status.HTTP_200_OK)
+async def connect_gmail_account(
+    payload: ConnectGmailRequest,
+    db: AsyncSession = Depends(get_db)
+):
+    """Exchanges OAuth authorization code for Google Refresh Token and encrypts it."""
+    result = await db.execute(select(User).where(User.id == payload.user_id))
+    user = result.scalars().first()
+
+    if not user:
+        fallback_res = await db.execute(
+            select(User).where(User.id == "02b7cfb6-f0b2-4d6e-a87b-0b85d4af5fb6")
+        )
+        user = fallback_res.scalars().first()
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User with ID '{payload.user_id}' not found."
+        )
+
+    token_url = "https://oauth2.googleapis.com/token"
+    body = {
+        "client_id": GOOGLE_CLIENT_ID,
+        "client_secret": GOOGLE_CLIENT_SECRET,
+        "code": payload.code,
+        "grant_type": "authorization_code",
+        "redirect_uri": payload.redirect_uri
+    }
+
+    async with httpx.AsyncClient() as client:
+        response = await client.post(token_url, data=body)
+        if response.status_code != 200:
+            logger.error(f"Google OAuth Error: {response.text}")
+            raise HTTPException(status_code=400, detail="Failed to exchange authorization code with Google.")
+
+        token_data = response.json()
+        refresh_token = token_data.get("refresh_token")
+
+        if not refresh_token:
+            raise HTTPException(
+                status_code=400,
+                detail="No refresh_token returned by Google. Ensure prompt='consent' and access_type='offline' are set."
+            )
+
+    user.google_refresh_token = encrypt_token(refresh_token)
+    await db.commit()
+    await db.refresh(user)
+
+    logger.info(f"📧 [GMAIL OAUTH LINKED] Encrypted Refresh Token saved for User '{user.id}'")
+
+    return {
+        "status": "success",
+        "message": "Gmail account successfully linked via Google OAuth.",
         "user_id": user.id
     }

@@ -1,7 +1,7 @@
 """
 User Database Model (Neon Postgres / SQLAlchemy 2.0)
 =====================================================
-Extends the user model to support multi-tenant GitHub & Smithery connection mapping.
+Extends the user model to support multi-tenant GitHub, Google OAuth & Smithery connection mapping.
 """
 
 from typing import Optional
@@ -36,6 +36,14 @@ class User(Base):
         nullable=True,
         default=None,
         doc="Encrypted GitHub access token for multi-tenant MCP tool invocation"
+    )
+
+    # Encrypted Google OAuth Refresh Token
+    google_refresh_token: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
+        default=None,
+        doc="Fernet-encrypted Google OAuth refresh token for direct Gmail API dispatch"
     )
 
     created_at: Mapped[datetime] = mapped_column(
