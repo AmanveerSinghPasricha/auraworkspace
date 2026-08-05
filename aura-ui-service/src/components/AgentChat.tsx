@@ -47,65 +47,12 @@ export function AgentChat() {
     setIsSending(true);
 
     try {
-      // Document context payload for RAG executions
-      const docContext = activeDocument
-        ? {
-            file_hash: activeDocument.file_hash,
-            document_ref: activeDocument.document_ref,
-            filename: activeDocument.filename,
-          }
-        : undefined;
-
-      // Primary chat execution call
-      const response = await api.sendMessage(userText, activeUserId, currentThreadId, docContext);
-
-      // Preserve active thread ID returned by gateway
-      if (response.thread_id || response.threadId) {
-        setCurrentThreadId(response.thread_id || response.threadId);
-      }
-
-      // 1. CHECK FOR HITL INTERRUPT SIGNAL FROM LANGGRAPH
-      const rawResponseStr = typeof response.response === 'string' ? response.response : '';
-      const isInterruptedSignal =
-        response.status === 'interrupted' ||
-        response.interrupt ||
-        response.response?.interrupt ||
-        rawResponseStr.includes('__interrupt__') ||
-        rawResponseStr.includes('Human authorization required') ||
-        rawResponseStr.includes('approval required');
-
-      if (isInterruptedSignal) {
-        // Extract staged payload safely
-        let interruptPayload = response.interrupt || response.response?.interrupt || response;
-
-        // Parse nested JSON if returned inside a raw text string
-        if (typeof interruptPayload === 'string' || rawResponseStr.includes('action_type')) {
-          try {
-            const jsonMatch = rawResponseStr.match(/\{[\s\S]*\}/);
-            if (jsonMatch) {
-              interruptPayload = JSON.parse(jsonMatch[0]);
-            }
-          } catch {
-            interruptPayload = {
-              action_type: 'send_email',
-              recipient: userText.match(/[\w.-]+@[\w.-]+\.\w+/)?.[0] || 'pasrichaamanveer@gmail.com',
-              subject: 'Verification Test',
-              body: userText,
-            };
-          }
-        }
-
-        setHitlData(interruptPayload);
-        setIsHitlOpen(true);
-
-        addMessage({
-          id: response.id || (Date.now() + 1).toString(),
-          sender: 'assistant',
-          content: '⚠️ Action approval required. Please review the pending action in the approval prompt.',
-          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        });
-        return;
-      }
+      // Pass user query along with active document context (if present)
+      const response = await api.sendMessage(userText, activeDocument ? {
+        file_hash: activeDocument.file_hash,
+        document_ref: activeDocument.document_ref,
+        filename: activeDocument.filename,
+      } : undefined);
 
       // 2. STANDARD ASSISTANT RESPONSE
       const messageContent =
