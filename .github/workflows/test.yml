@@ -2,7 +2,7 @@ name: Aura Gateway CI/CD Pipeline
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "feature/*" ]
   pull_request:
     branches: [ "main" ]
 
@@ -50,13 +50,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # Step 5: Execute full Pytest test suite using GitHub Secrets & Dummy DB URL
+      # Step 5: Execute full Pytest test suite using Fallback Secrets & Async SQLite Memory DB
       - name: Run Pytest test suite
         env:
-          SECRET_KEY: ${{ secrets.CI_SECRET_KEY }}
+          SECRET_KEY: ${{ secrets.CI_SECRET_KEY || 'test_secret_key_32_bytes_long_exact!!' }}
           ALGORITHM: "HS256"
           ACCESS_TOKEN_EXPIRE_MINUTES: "30"
-          DATABASE_URL: "postgresql://postgres:postgres@localhost:5432/aura_db"
+          DATABASE_URL: "sqlite+aiosqlite:///:memory:"
         run: |
           python -m pytest -v
 
