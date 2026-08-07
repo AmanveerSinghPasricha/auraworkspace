@@ -3,12 +3,20 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useAppStore } from '../store/useAppStore';
 import { api } from '../hooks/useApi';
+import { useAuth } from '@/context/AuthContext';
+import HitlApprovalModal from './HitlApprovalModal';
 
 export function AgentChat() {
+  const { user } = useAuth();
   const [input, setInput] = useState('');
   const [isSending, setIsSending] = useState(false);
   const { messages, addMessage, activeDocument } = useAppStore();
   const chatEndRef = useRef<HTMLDivElement>(null);
+
+  // HITL Modal State
+  const [hitlData, setHitlData] = useState<any>(null);
+  const [isHitlOpen, setIsHitlOpen] = useState<boolean>(false);
+  const [currentThreadId, setCurrentThreadId] = useState<string>('thread_demo_001');
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -21,7 +29,14 @@ export function AgentChat() {
     const userText = input.trim();
     setInput('');
 
-    // Add user message to store
+    // Safely resolve the logged-in user ID from Auth context
+    const activeUserId = 
+      user?.id || 
+      user?.user_id || 
+      user?.email || 
+      '02b7cfb6-f0b2-4d6e-a87b-0b85d4af5fb6';
+
+    // Add user message to UI state store
     addMessage({
       id: Date.now().toString(),
       sender: 'user',
@@ -39,7 +54,7 @@ export function AgentChat() {
         filename: activeDocument.filename,
       } : undefined);
 
-      // Check response.response first (matches FastAPI gateway contract)
+      // 2. STANDARD ASSISTANT RESPONSE
       const messageContent =
         response.response || response.content || response.message || 'Response received from AURA agent.';
 
@@ -62,8 +77,24 @@ export function AgentChat() {
     }
   };
 
+  // Callback executed when HitlApprovalModal completes the resume action
+  const handleHitlCompleted = (resumedResponseText?: string) => {
+    addMessage({
+      id: (Date.now() + 1).toString(),
+      sender: 'assistant',
+      content: typeof resumedResponseText === 'string' && resumedResponseText.trim() !== '' 
+        ? resumedResponseText 
+        : 'Action processed successfully.',
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    });
+
+    // Reset modal state
+    setIsHitlOpen(false);
+    setHitlData(null);
+  };
+
   return (
-    <div className="bg-slate-950/60 border border-slate-800 rounded-xl p-5 flex flex-col h-[650px]">
+    <div className="bg-slate-950/60 border border-slate-800 rounded-xl p-5 flex flex-col h-[650px] relative">
       <h2 className="text-sm font-semibold text-slate-200 mb-4 flex items-center gap-2">
         <span>💬</span> Agent Chat Workspace
       </h2>
@@ -139,6 +170,20 @@ export function AgentChat() {
           {isSending ? 'Sending...' : 'Send'}
         </button>
       </form>
+
+      {/* HITL Approval Modal Mount */}
+      <HitlApprovalModal
+        isOpen={isHitlOpen}
+        threadId={currentThreadId}
+        data={hitlData}
+        onClose={(resumedText?: string) => {
+          handleHitlCompleted(
+            typeof resumedText === 'string' && resumedText.trim() !== '' 
+              ? resumedText 
+              : 'Action processed successfully.'
+          );
+        }}
+      />
     </div>
   );
 }

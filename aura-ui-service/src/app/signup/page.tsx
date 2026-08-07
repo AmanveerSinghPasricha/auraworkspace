@@ -61,19 +61,22 @@ export default function SignUpPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!formData.role_or_title.trim() || !formData.primary_goal.trim()) {
-      setError("Please complete your professional role and primary goal.");
-      return;
-    }
-
     setError(null);
     setIsSubmitting(true);
 
     try {
+      // Sends payload to FastAPI at http://localhost:8000/api/v1/auth/signup
       const authData = await signupUser(formData);
-      login(authData);
+      
+      // Log user in with returned JWT token
+      if (authData && authData.access_token) {
+        login(authData);
+      } else {
+        throw new Error("No access token returned from server.");
+      }
     } catch (err: any) {
-      setError(err?.message || "An error occurred during registration.");
+      console.error("Signup error:", err);
+      setError(err?.message || "An error occurred during registration. Make sure backend is running on port 8000.");
       setIsSubmitting(false);
     }
   };
@@ -81,7 +84,7 @@ export default function SignUpPage() {
   return (
     <div style={{ minHeight: "100vh", backgroundColor: "#020617", color: "#f8fafc", display: "flex", alignItems: "center", justifyContent: "center", padding: "1rem", position: "relative", overflow: "hidden" }}>
       
-      {/* Centered Form Card with Strict Inline Fallbacks & Tailwind Classes */}
+      {/* Centered Form Card */}
       <div 
         className="w-full max-w-md rounded-2xl border border-slate-800 bg-slate-900/90 p-8 shadow-2xl backdrop-blur-xl"
         style={{ width: "100%", maxWidth: "28rem", backgroundColor: "#0f172a", borderRadius: "1rem", border: "1px solid #1e293b", padding: "2rem", boxSizing: "border-box" }}
@@ -175,8 +178,7 @@ export default function SignUpPage() {
               </label>
               <input
                 type="text"
-                required
-                placeholder="e.g. Lead Cybersecurity Analyst"
+                placeholder="e.g. Lead Software Developer"
                 style={{ width: "100%", backgroundColor: "#1e293b", border: "1px solid #334155", borderRadius: "0.75rem", padding: "0.625rem 1rem", fontSize: "0.875rem", color: "#ffffff", outline: "none", boxSizing: "border-box" }}
                 value={formData.role_or_title}
                 onChange={(e) => setFormData({ ...formData, role_or_title: e.target.value })}
@@ -188,9 +190,8 @@ export default function SignUpPage() {
                 Primary Goal for Aura AI
               </label>
               <textarea
-                required
                 rows={2}
-                placeholder="e.g. Auditing NIST compliance controls and summarizing technical architecture."
+                placeholder="e.g. Code reports and architectural design summaries."
                 style={{ width: "100%", backgroundColor: "#1e293b", border: "1px solid #334155", borderRadius: "0.75rem", padding: "0.625rem 1rem", fontSize: "0.875rem", color: "#ffffff", outline: "none", resize: "none", boxSizing: "border-box" }}
                 value={formData.primary_goal}
                 onChange={(e) => setFormData({ ...formData, primary_goal: e.target.value })}
@@ -252,7 +253,7 @@ export default function SignUpPage() {
               </label>
               <input
                 type="text"
-                placeholder="e.g. Always include compliance control numbers"
+                placeholder="e.g. Always keep response elaborate"
                 style={{ width: "100%", backgroundColor: "#1e293b", border: "1px solid #334155", borderRadius: "0.75rem", padding: "0.625rem 1rem", fontSize: "0.875rem", color: "#ffffff", outline: "none", boxSizing: "border-box" }}
                 value={formData.additional_context || ""}
                 onChange={(e) => setFormData({ ...formData, additional_context: e.target.value })}

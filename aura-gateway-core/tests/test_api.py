@@ -92,9 +92,10 @@ async def test_document_upload_endpoint():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post("/api/v1/documents/upload", files=files)
 
-    assert response.status_code == 200
+    # FastAPI returns HTTP 202 Accepted for background processing
+    assert response.status_code == 202
     data = response.json()
-    assert data["status"] == "queued"
+    assert data["status"] == "accepted"
     assert "job_id" in data
     assert data["filename"] == "test_doc.txt"
 

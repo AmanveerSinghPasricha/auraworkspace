@@ -4,6 +4,7 @@ Aura Gateway Core - Centralized Model & Environment Configuration
 
 import os
 from typing import Optional
+from pydantic import ConfigDict
 from pydantic_settings import BaseSettings
 
 
@@ -20,7 +21,7 @@ class Settings(BaseSettings):
     EXA_API_KEY: Optional[str] = os.getenv("EXA_API_KEY", None)
     TAVILY_API_KEY: Optional[str] = os.getenv("TAVILY_API_KEY", None)
 
-    # Node Model Registry - Router
+    # Node Model Registry - Router (Higher daily TPD fallback limit)
     LLM_ROUTER_MODEL: str = "groq/llama-3.3-70b-versatile"
     LLM_ROUTER_FALLBACK: str = "groq/llama-3.1-8b-instant"
 
@@ -32,7 +33,7 @@ class Settings(BaseSettings):
     LLM_EXTRACTOR_PRIMARY: str = "groq/llama-3.3-70b-versatile"
     LLM_EXTRACTOR_FALLBACK: str = "groq/llama-3.1-8b-instant"
 
-    # General Agent Stack (Provides aliases for standard LLM naming)
+    # General Agent Stack
     LLM_GENERAL_PRIMARY: str = "groq/llama-3.3-70b-versatile"
     LLM_GENERAL_FALLBACK: str = "groq/llama-3.1-8b-instant"
     
@@ -44,9 +45,7 @@ class Settings(BaseSettings):
     def LLM_FALLBACK(self) -> str:
         return self.LLM_GENERAL_FALLBACK
 
-    class Config:
-        env_file = ".env"
-        extra = "ignore"
+    model_config = ConfigDict(env_file=".env", extra="ignore")
 
 
 # Global Config Instance

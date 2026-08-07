@@ -7,6 +7,8 @@ import { useAppStore } from '../store/useAppStore';
 import { api } from '../hooks/useApi';
 import { DocumentUpload } from '../components/DocumentUpload';
 import { AgentChat } from '../components/AgentChat';
+import { GithubConnectButton } from '../components/GithubConnectButton';
+import { ConnectGmailButton } from '../components/ConnectGmailButton';
 
 export default function Home() {
   const { user, isLoading, logout } = useAuth();
@@ -52,6 +54,9 @@ export default function Home() {
     );
   }
 
+  // Safe fallback to resolve the active user UUID
+  const activeUserId = user.id || user.user_id || '02b7cfb6-f0b2-4d6e-a87b-0b85d4af5fb6';
+
   return (
     <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col font-sans">
       {/* Header */}
@@ -77,6 +82,10 @@ export default function Home() {
               Gateway: {health.status}
             </span>
           </div>
+
+          {/* Integration OAuth Connection Buttons */}
+          <ConnectGmailButton userId={activeUserId} />
+          <GithubConnectButton userId={activeUserId} />
 
           {/* User Profile & Logout */}
           <div className="flex items-center gap-3 border-l border-slate-800 pl-4">

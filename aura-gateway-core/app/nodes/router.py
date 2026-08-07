@@ -5,6 +5,8 @@ Classifies user intent dynamically into active graph execution routes:
 - GENERAL_AGENT: Open-ended conversation, general chat, or coding help
 - RAG_ENGINE: Knowledge base retrieval & document-grounded queries
 - EXTRACTOR: Structured matrix/JSON schema extraction requests
+- EMAIL_AGENT: Dispatching, drafting, sending emails, or contacting recipients
+- GITHUB_AGENT: Managing GitHub repos, issues, pull requests, commits, or code search
 """
 
 import logging
@@ -25,9 +27,9 @@ instructor_client = instructor.from_litellm(acompletion)
 
 class IntentClassification(BaseModel):
     """Pydantic model for strict router intent output from LLM."""
-    active_route: Literal["GENERAL_AGENT", "RAG_ENGINE", "EXTRACTOR"] = Field(
+    active_route: Literal["GENERAL_AGENT", "RAG_ENGINE", "EXTRACTOR", "EMAIL_AGENT", "GITHUB_AGENT"] = Field(
         ...,
-        description="The assigned execution branch. Allowed values: 'GENERAL_AGENT', 'RAG_ENGINE', or 'EXTRACTOR'."
+        description="The assigned execution branch. Allowed values: 'GENERAL_AGENT', 'RAG_ENGINE', 'EXTRACTOR', 'EMAIL_AGENT', or 'GITHUB_AGENT'."
     )
     confidence_score: float = Field(
         default=1.0,
@@ -90,11 +92,13 @@ async def supervisor_router_node(state: GraphState) -> Dict[str, Any]:
     system_prompt = (
         "You are Aura Workspace's Central Intent Supervisor.\n"
         "Your task is to analyze the conversation context and select the exact active route:\n\n"
-        "1. 'RAG_ENGINE': Select if the query asks about document content, rules, NIST controls, policies, PDF technical specs, or if the user is answering a previous document disambiguation question.\n"
-        "2. 'EXTRACTOR': Select ONLY if the user explicitly requests to parse, transform, or extract unstructured input directly into a structured table, JSON schema, or matrix format.\n"
-        "3. 'GENERAL_AGENT': Select for casual greetings, general knowledge, standard conversation, or non-document tasks.\n\n"
+        "1. 'GITHUB_AGENT': Select if the user wants to interact with GitHub (list repositories, create issues, search code, check pull requests, view commit history, or inspect user repos).\n"
+        "2. 'EMAIL_AGENT': Select if the user wants to communicate, contact, notify, draft, send an email, or deliver a message to any recipient (including sanitized tokens like <EMAIL_ADDRESS>).\n"
+        "3. 'RAG_ENGINE': Select if the query asks about document content, rules, NIST controls, policies, PDF technical specs, or if the user is answering a previous document disambiguation question.\n"
+        "4. 'EXTRACTOR': Select ONLY if the user explicitly requests to parse, transform, or extract unstructured input directly into a structured table, JSON schema, or matrix format.\n"
+        "5. 'GENERAL_AGENT': Select for casual greetings, general knowledge, standard conversation, or non-document tasks.\n\n"
         f"Active Workspace Context: Document Currently Attached = {has_active_doc}\n"
-        "Outputs MUST match one of these exact route names: GENERAL_AGENT, RAG_ENGINE, or EXTRACTOR."
+        "Outputs MUST match one of these exact route names: GENERAL_AGENT, RAG_ENGINE, EXTRACTOR, EMAIL_AGENT, or GITHUB_AGENT."
     )
 
     try:
@@ -114,7 +118,8 @@ async def supervisor_router_node(state: GraphState) -> Dict[str, Any]:
         )
 
         route_upper = classification.active_route.upper()
-        if route_upper not in ["GENERAL_AGENT", "RAG_ENGINE", "EXTRACTOR"]:
+        allowed_routes = ["GENERAL_AGENT", "RAG_ENGINE", "EXTRACTOR", "EMAIL_AGENT", "GITHUB_AGENT"]
+        if route_upper not in allowed_routes:
             route_upper = "RAG_ENGINE" if has_active_doc else "GENERAL_AGENT"
 
         logger.info(f"🎯 [ROUTER DECISION] Route: '{route_upper}' | Confidence: {classification.confidence_score} | Reason: {classification.reasoning}")

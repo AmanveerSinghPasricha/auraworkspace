@@ -23,11 +23,12 @@ requires_ssl = "neon.tech" in raw_url_lower or "ssl" in raw_url_lower or "sslmod
 if DATABASE_URL.startswith("postgresql://"):
     DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
 
-# 2. Strip parameters (sslmode, channel_binding) that break asyncpg
+# 2. Strip parameters (ssl, sslmode, channel_binding) that break asyncpg & pool connections
 parsed_url = urlparse(DATABASE_URL)
 if parsed_url.query:
     query_params = parse_qs(parsed_url.query)
     query_params.pop("sslmode", None)
+    query_params.pop("ssl", None)
     query_params.pop("channel_binding", None)
     
     new_query = urlencode(query_params, doseq=True)

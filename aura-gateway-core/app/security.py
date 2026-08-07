@@ -1,11 +1,12 @@
 """
 Aura Gateway Core - Security & Authentication Layer
 
-Provides password hashing/validation via pwdlib (Argon2) and JWT token
+Provides password hashing/validation via pwdlib (Argon2 & Bcrypt) and JWT token
 encoding/decoding via PyJWT for secure API access.
 """
 
 import os
+import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict
@@ -14,6 +15,9 @@ from dotenv import load_dotenv
 from fastapi import HTTPException, status
 from pwdlib import PasswordHash
 from pwdlib.hashers.argon2 import Argon2Hasher
+from pwdlib.hashers.bcrypt import BcryptHasher
+
+logger = logging.getLogger("security")
 
 # Dynamically resolve .env path relative to security.py location
 ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
@@ -27,8 +31,8 @@ JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY", "default_fallback_secret_key_c
 JWT_ALGORITHM: str = os.getenv("JWT_ALGORITHM", "HS256")
 ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
 
-# Initialize Password Hash Context using Argon2
-password_hash_context = PasswordHash((Argon2Hasher(),))
+# Initialize Password Hash Context supporting both Argon2 (new) and Bcrypt (legacy)
+password_hash_context = PasswordHash((Argon2Hasher(), BcryptHasher()))
 
 
 def hash_password(plain_password: str) -> str:
@@ -46,16 +50,23 @@ def hash_password(plain_password: str) -> str:
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """
-    Verifies a plain text password against an Argon2 hashed password.
+    Verifies a plain text password against hashed passwords, handling invalid or
+    unknown hash formats gracefully without crashing.
 
     Args:
         plain_password (str): Raw user password attempt.
-        hashed_password (str): Stored Argon2 hash.
+        hashed_password (str): Stored hash string.
 
     Returns:
         bool: True if password matches, False otherwise.
     """
-    return password_hash_context.verify(plain_password, hashed_password)
+    if not hashed_password:
+        return False
+    try:
+        return password_hash_context.verify(plain_password, hashed_password)
+    except Exception as exc:
+        logger.warning(f"⚠️ Password verification failed due to unrecognized or invalid hash format: {exc}")
+        return False
 
 
 def create_access_token(data: Dict[str, Any], expires_delta: timedelta | None = None) -> str:

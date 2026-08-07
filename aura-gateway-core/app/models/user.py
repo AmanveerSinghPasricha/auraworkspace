@@ -1,27 +1,57 @@
-import uuid
-from sqlalchemy import Column, String, DateTime, Text, JSON
-from sqlalchemy.dialects.postgresql import ARRAY
-from sqlalchemy.sql import func
+"""
+User Database Model (Neon Postgres / SQLAlchemy 2.0)
+=====================================================
+Extends the user model to support multi-tenant GitHub, Google OAuth & Smithery connection mapping.
+"""
+
+from typing import Optional
+from datetime import datetime, timezone
+from sqlalchemy import String, DateTime, Text
+from sqlalchemy.orm import Mapped, mapped_column
 from app.db import Base
+
 
 class User(Base):
     __tablename__ = "users"
 
-    id = Column(String, primary_key=True, default=lambda: f"usr_{uuid.uuid4().hex[:12]}")
-    email = Column(String, unique=True, index=True, nullable=False)
-    hashed_password = Column(String, nullable=False)
-    full_name = Column(String, nullable=False)
+    id: Mapped[str] = mapped_column(String, primary_key=True, index=True)
+    email: Mapped[str] = mapped_column(String, unique=True, index=True, nullable=False)
+    full_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
-    # Long-Term Memory & Preference Fields
-    role_or_title = Column(String, nullable=False)
-    primary_goal = Column(Text, nullable=False)
-    preferred_tone = Column(String, default="Direct & Concise")
-    
-    # ARRAY for Postgres production; JSON variant for SQLite pytest suite
-    domain_expertise = Column(
-        ARRAY(String).with_variant(JSON, "sqlite"),
-        default=list
+    # Password field for Auth
+    password_hash: Mapped[str] = mapped_column(String, nullable=False)
+
+    # Smithery AI Managed Connection ID
+    smithery_connection_id: Mapped[Optional[str]] = mapped_column(
+        String,
+        nullable=True,
+        default=None,
+        index=True,
+        doc="Stores the Smithery connection ID issued after user consents via OAuth flow"
     )
-    additional_context = Column(Text, nullable=True, default="")
 
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    # Encrypted GitHub OAuth Access Token
+    github_access_token: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
+        default=None,
+        doc="Encrypted GitHub access token for multi-tenant MCP tool invocation"
+    )
+
+    # Encrypted Google OAuth Refresh Token
+    google_refresh_token: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
+        default=None,
+        doc="Fernet-encrypted Google OAuth refresh token for direct Gmail API dispatch"
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc)
+    )
