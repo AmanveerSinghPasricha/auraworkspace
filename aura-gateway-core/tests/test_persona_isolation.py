@@ -7,16 +7,14 @@ from app.db import engine, Base
 from app.graph import create_aura_graph
 
 # ---------------------------------------------------------------------------
-# GLOBAL FIXTURES: DB Schema & Graph Engine Lifecycle Setup
+# GLOBAL FIXTURE: Initialize SQLite Tables in Memory Before Tests
 # ---------------------------------------------------------------------------
 @pytest_asyncio.fixture(autouse=True)
 async def setup_test_environment():
     """Initializes SQLite tables in memory and bootstraps the LangGraph engine."""
-    # 1. Create SQL Tables
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         
-    # 2. Ensure LangGraph Engine is compiled and attached
     if main_module.compiled_aura_graph is None:
         main_module.compiled_aura_graph = create_aura_graph(
             checkpointer=main_module.checkpointer_instance, 
@@ -42,7 +40,7 @@ TEST_PERSONAS = [
         "primary_goal": "Audit database security and encryption controls under NIST 800-53.",
         "preferred_tone": "Detailed & Technical",
         "domain_expertise": ["NIST 800-53", "Database Security", "Encryption"],
-        "prompt_query": "How should I address a database performance bottleneck from a NIST compliance and encryption perspective?"
+        "prompt_query": "How should I address a database performance bottleneck from a NIST compliance perspective?"
     },
     {
         "name": "DevOps / Infrastructure Engineer",
@@ -64,7 +62,7 @@ TEST_PERSONAS = [
         "primary_goal": "Understand high-level business impact, costs, and strategic action plans.",
         "preferred_tone": "Conversational & High-Level",
         "domain_expertise": ["Business Strategy", "Budgeting"],
-        "prompt_query": "How should I address a database performance bottleneck in terms of high-level business costs and priority?"
+        "prompt_query": "How should I address a database performance bottleneck in terms of high-level business costs?"
     }
 ]
 
@@ -75,8 +73,8 @@ async def test_multi_user_persona_chat_isolation():
     Comprehensive Test:
     1. Registers 3 distinct user personas with different memory profiles.
     2. Logins as each persona to acquire separate JWT Bearer Tokens and User IDs.
-    3. Sends context-specific prompts with individual department/role details to the chat execution endpoint.
-    4. Validates that user isolation is maintained and responses reflect individual persona contexts without hitting duplicate cache entries.
+    3. Sends context-specific prompts to the chat execution endpoint.
+    4. Validates that user isolation is maintained and responses reflect individual persona contexts.
     """
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://test"
