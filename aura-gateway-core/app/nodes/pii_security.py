@@ -6,28 +6,18 @@ Sanitizes sensitive entities before messages propagate through the graph.
 """
 
 import logging
-from typing import Dict, Any, List
+import threading
+from typing import Dict, Any, List, Tuple
 from langchain_core.messages import HumanMessage, BaseMessage, RemoveMessage
-from presidio_analyzer import AnalyzerEngine
-from presidio_analyzer.nlp_engine import NlpEngineProvider
-from presidio_anonymizer import AnonymizerEngine
 
 from app.state import GraphState
 
 logger = logging.getLogger("pii_guardrail")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-# Explicitly configure Presidio to use the lightweight spaCy model (en_core_web_sm)
-provider = NlpEngineProvider(nlp_configuration={
-    "nlp_engine_name": "spacy",
-    "models": [{"lang_code": "en", "model_name": "en_core_web_sm"}],
-})
-
-nlp_engine = provider.create_engine()
-
-# Initialize Presidio Engines once at startup with small model engine
-analyzer_engine = AnalyzerEngine(nlp_engine=nlp_engine)
-anonymizer_engine = AnonymizerEngine()
+# Global singleton caches for lazy initialization
+_analyzer_engine = None
+_anonymizer_engine = None
+_engine_lock = threading.Lock()
 
 # Target entities to redact (EMAIL_ADDRESS is intentionally excluded so EMAIL_AGENT gets intact target recipients)
 ALLOWED_PII_ENTITIES = [
@@ -43,13 +33,38 @@ ALLOWED_PII_ENTITIES = [
 ]
 
 
+def get_presidio_engines() -> Tuple[Any, Any]:
+    """
+    Lazy-loads Microsoft Presidio and spaCy NLP engines on first use.
+    Prevents heavy ML models from loading into RAM during app startup (avoids Exit 137 OOM).
+    """
+    global _analyzer_engine, _anonymizer_engine
+
+    if _analyzer_engine is None or _anonymizer_engine is None:
+        with _engine_lock:
+            if _analyzer_engine is None or _anonymizer_engine is None:
+                logger.info("🛡️ [PII GUARDRAIL] Lazy-loading Presidio & spaCy (en_core_web_sm)...")
+                from presidio_analyzer import AnalyzerEngine
+                from presidio_analyzer.nlp_engine import NlpEngineProvider
+                from presidio_anonymizer import AnonymizerEngine
+
+                provider = NlpEngineProvider(nlp_configuration={
+                    "nlp_engine_name": "spacy",
+                    "models": [{"lang_code": "en", "model_name": "en_core_web_sm"}],
+                })
+                nlp_engine = provider.create_engine()
+                _analyzer_engine = AnalyzerEngine(nlp_engine=nlp_engine)
+                _anonymizer_engine = AnonymizerEngine()
+                logger.info("✅ [PII GUARDRAIL] Presidio engines initialized successfully.")
+
+    return _analyzer_engine, _anonymizer_engine
+
+
 async def pii_redaction_node(state: GraphState) -> Dict[str, Any]:
     """
     Pre-Graph Middleware Node using Microsoft Presidio.
     Analyzes incoming HumanMessage, redacts sensitive PII entities, and updates graph state cleanly.
     """
-    logger.info("🛡️ [PII GUARDRAIL] Running Presidio Engine...")
-
     # Extract messages safely whether state is a dict or GraphState object
     messages = state.get("messages", []) if isinstance(state, dict) else getattr(state, "messages", [])
 
@@ -62,8 +77,13 @@ async def pii_redaction_node(state: GraphState) -> Dict[str, Any]:
 
     raw_text = str(latest_msg.content)
 
-    # 1. Analyze for specific PII entities (excluding EMAIL_ADDRESS)
-    analyzer_results = analyzer_engine.analyze(
+    # 1. Lazy load Presidio engines (Only consumes memory when executing this node)
+    analyzer, anonymizer = get_presidio_engines()
+
+    logger.info("🛡️ [PII GUARDRAIL] Running Presidio Engine...")
+
+    # 2. Analyze for specific PII entities (excluding EMAIL_ADDRESS)
+    analyzer_results = analyzer.analyze(
         text=raw_text,
         language="en",
         entities=ALLOWED_PII_ENTITIES,
@@ -72,8 +92,8 @@ async def pii_redaction_node(state: GraphState) -> Dict[str, Any]:
     if not analyzer_results:
         return {"validation_errors": []}  # Clean prompt, proceed
 
-    # 2. Anonymize detected entities
-    anonymized = anonymizer_engine.anonymize(
+    # 3. Anonymize detected entities
+    anonymized = anonymizer.anonymize(
         text=raw_text,
         analyzer_results=analyzer_results
     )
@@ -81,7 +101,7 @@ async def pii_redaction_node(state: GraphState) -> Dict[str, Any]:
 
     logger.info(f"🔒 [PII REDACTED] Presidio masked {len(analyzer_results)} sensitive entity/entities.")
 
-    # 3. Safely update message history using RemoveMessage
+    # 4. Safely update message history using RemoveMessage
     output_messages: List[BaseMessage] = []
     if hasattr(latest_msg, "id") and latest_msg.id:
         output_messages.append(RemoveMessage(id=latest_msg.id))
