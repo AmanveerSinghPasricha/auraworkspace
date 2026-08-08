@@ -11,6 +11,7 @@ import json
 import uuid
 import logging
 import uvicorn
+import threading
 from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Dict, Any, List, Optional, AsyncGenerator
@@ -38,9 +39,11 @@ except ImportError:
 
 from app.state import UserProfileContext
 
-# OS Optimizations for High-Concurrency Execution
+# OS Optimizations for High-Concurrency Execution & Reduced RAM Footprint
 os.environ["MALLOC_TRIM_THRESHOLD_"] = "65536"
-os.environ["OMP_NUM_THREADS"] = "2"
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
 
 logger = logging.getLogger("aura_main")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -48,10 +51,27 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 UPLOAD_DIR = Path("./uploads")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-# Global Graph & Checkpointer Instances
+# Global Graph & Checkpointer Singletons
 compiled_aura_graph = None
 checkpointer_instance = MemorySaver()  # Production fallback checkpointer
+graph_lock = threading.Lock()
 ingestion_jobs: Dict[str, Dict[str, Any]] = {}
+
+
+def get_compiled_graph():
+    """
+    Lazy-loads and compiles the LangGraph multi-agent state machine on first execution.
+    Prevents heavy ML module loads on app startup to avoid Render Exit 137 OOM crashes.
+    """
+    global compiled_aura_graph, checkpointer_instance
+    if compiled_aura_graph is None:
+        with graph_lock:
+            if compiled_aura_graph is None:
+                logger.info("⚙️ [GRAPH ENGINE] Compiling LangGraph state machine (Lazy Loaded)...")
+                from app.graph import create_aura_graph
+                compiled_aura_graph = create_aura_graph(checkpointer=checkpointer_instance, store=None)
+                logger.info("✅ [GRAPH ENGINE] State machine compiled successfully.")
+    return compiled_aura_graph
 
 
 # =====================================================================
@@ -60,10 +80,9 @@ ingestion_jobs: Dict[str, Dict[str, Any]] = {}
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    Manages database pool initialization, ORM schema creation, and compiled
-    LangGraph engine state persistence on startup.
+    Manages database pool initialization and ORM schema creation on startup.
+    Graph compilation is deferred to first request access for fast, low-RAM boot.
     """
-    global compiled_aura_graph, checkpointer_instance
     logger.info("🚀 [GATEWAY STARTUP] Bootstrapping Aura Gateway Core Service...")
 
     try:
@@ -74,15 +93,8 @@ async def lifespan(app: FastAPI):
             await conn.run_sync(Base.metadata.create_all)
         logger.info("✅ [DATABASE ORM] Schema verified & active.")
 
-        from app.graph import create_aura_graph
-        compiled_aura_graph = create_aura_graph(checkpointer=checkpointer_instance, store=None)
-        logger.info("✅ [GRAPH ENGINE] LangGraph state machine compiled with active checkpointer.")
-
     except Exception as exc:
-        logger.error(f"❌ [STARTUP CRITICAL] Failed to initialize backend core: {exc}", exc_info=True)
-        if compiled_aura_graph is None:
-            from app.graph import create_aura_graph
-            compiled_aura_graph = create_aura_graph(checkpointer=checkpointer_instance, store=None)
+        logger.error(f"❌ [STARTUP WARNING] Database initialization issue: {exc}", exc_info=True)
 
     yield
 
@@ -169,23 +181,24 @@ class ResumeRequestPayload(BaseModel):
 # =====================================================================
 async def process_document_background_task(job_id: str, file_path: Path, filename: str):
     """Parses and indexes uploaded documents asynchronously."""
-    from app.nodes.rag import _vectorless_engine_instance
+    from app.nodes.rag import get_vectorless_engine
+    vectorless_engine = get_vectorless_engine()
 
     try:
         logger.info(f"🔄 [ASYNC INGESTION] Starting job '{job_id}' for file: {filename}")
         ingestion_jobs[job_id]["status"] = "processing"
         ingestion_jobs[job_id]["progress"] = 15
 
-        file_hash = _vectorless_engine_instance.compute_file_hash(str(file_path))
-        root_tree = _vectorless_engine_instance.load_tree_from_cache(file_hash)
-        
+        file_hash = vectorless_engine.compute_file_hash(str(file_path))
+        root_tree = vectorless_engine.load_tree_from_cache(file_hash)
+
         if not root_tree:
             ingestion_jobs[job_id]["progress"] = 40
-            root_tree = await _vectorless_engine_instance.parse_file_to_tree(str(file_path))
-            
+            root_tree = await vectorless_engine.parse_file_to_tree(str(file_path))
+
             ingestion_jobs[job_id]["progress"] = 75
-            await _vectorless_engine_instance.generate_node_summaries(root_tree)
-            _vectorless_engine_instance.save_tree_to_cache(file_hash, root_tree)
+            await vectorless_engine.generate_node_summaries(root_tree)
+            vectorless_engine.save_tree_to_cache(file_hash, root_tree)
 
         ingestion_jobs[job_id]["status"] = "completed"
         ingestion_jobs[job_id]["progress"] = 100
@@ -209,7 +222,8 @@ async def process_document_background_task(job_id: str, file_path: Path, filenam
 # 5. SSE STREAMING GENERATOR
 # =====================================================================
 async def event_stream_generator(payload: ChatRequestPayload) -> AsyncGenerator[str, None]:
-    if not compiled_aura_graph:
+    graph = get_compiled_graph()
+    if not graph:
         yield f"data: {json.dumps({'type': 'error', 'message': 'Graph engine is uninitialized.'})}\n\n"
         return
 
@@ -240,7 +254,7 @@ async def event_stream_generator(payload: ChatRequestPayload) -> AsyncGenerator[
     config = {"configurable": {"thread_id": payload.thread_id}}
 
     try:
-        async for event in compiled_aura_graph.astream_events(initial_state, config=config, version="v2"):
+        async for event in graph.astream_events(initial_state, config=config, version="v2"):
             kind = event.get("event")
             node_name = event.get("name", "")
 
@@ -284,14 +298,15 @@ async def health_check():
     except Exception as exc:
         logger.error(f"❌ [HEALTH CHECK] DB ping failed: {exc}")
 
-    is_healthy = (compiled_aura_graph is not None) and db_healthy
+    graph = get_compiled_graph()
+    is_healthy = (graph is not None) and db_healthy
 
     return {
         "status": "healthy" if is_healthy else "unhealthy",
         "service": getattr(settings, "APP_NAME", "Aura Gateway Core"),
         "version": app.version,
         "diagnostics": {
-            "graph_compiled": compiled_aura_graph is not None,
+            "graph_compiled": graph is not None,
             "database_connected": db_healthy,
         }
     }
@@ -299,13 +314,13 @@ async def health_check():
 
 @app.post("/api/v1/chat", response_model=ChatResponsePayload, tags=["Execution Engine"])
 async def execute_chat_query(payload: ChatRequestPayload, x_user_id: Optional[str] = Header(None)):
-    if not compiled_aura_graph:
+    graph = get_compiled_graph()
+    if not graph:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="State graph engine is uninitialized.",
         )
 
-    # Honor Header Authorization User ID first, then body payload, then fallback default
     resolved_user_id = x_user_id or payload.user_id or "02b7cfb6-f0b2-4d6e-a87b-0b85d4af5fb6"
     logger.info(f"📩 [CHAT EXECUTION] Processing thread '{payload.thread_id}' for user '{resolved_user_id}'...")
 
@@ -334,11 +349,11 @@ async def execute_chat_query(payload: ChatRequestPayload, x_user_id: Optional[st
     config = {"configurable": {"thread_id": payload.thread_id}}
 
     try:
-        final_state = await compiled_aura_graph.ainvoke(initial_state, config=config)
+        final_state = await graph.ainvoke(initial_state, config=config)
 
         # 1. INSPECT STATE FOR INTERRUPTS (HITL PAUSE)
-        graph_snapshot = await compiled_aura_graph.aget_state(config)
-        
+        graph_snapshot = await graph.aget_state(config)
+
         if graph_snapshot.next:
             interrupt_val = {}
             if graph_snapshot.tasks and graph_snapshot.tasks[0].interrupts:
@@ -346,7 +361,6 @@ async def execute_chat_query(payload: ChatRequestPayload, x_user_id: Optional[st
 
             staged_payload = final_state.get("staged_action_payload") or {}
 
-            # Construct clean structured HITL interrupt metadata
             interrupt_data = interrupt_val or {
                 "action_type": staged_payload.get("action_type") or "send_email",
                 "recipient": staged_payload.get("recipient") or "pasrichaamanveer@gmail.com",
@@ -402,14 +416,13 @@ async def execute_chat_query(payload: ChatRequestPayload, x_user_id: Optional[st
 
 @app.post("/api/v1/chat/resume", tags=["Execution Engine"])
 async def resume_interrupted_chat(payload: ResumeRequestPayload):
-    """Resumes graph execution for a thread following human approval or rejection."""
-    if not compiled_aura_graph:
+    graph = get_compiled_graph()
+    if not graph:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="State graph engine is uninitialized."
         )
 
-    # Extract approval decision regardless of flat or nested JSON structure
     is_approved = payload.approved
     if is_approved is None and payload.resume_payload:
         is_approved = payload.resume_payload.get("approved", True)
@@ -421,8 +434,8 @@ async def resume_interrupted_chat(payload: ResumeRequestPayload):
 
     try:
         logger.info(f"🔄 [GRAPH RESUME] Resuming thread '{payload.thread_id}' with decision: approved={is_approved}")
-        
-        final_state = await compiled_aura_graph.ainvoke(
+
+        final_state = await graph.ainvoke(
             Command(resume={"approved": is_approved}),
             config=config
         )
@@ -457,7 +470,6 @@ async def upload_document_endpoint(
     background_tasks: BackgroundTasks, 
     file: UploadFile = File(...)
 ):
-    """Dispatches document parsing and vectorless indexing to a background queue."""
     allowed_extensions = {".pdf", ".docx", ".xlsx", ".pptx", ".txt", ".md"}
     file_ext = Path(file.filename).suffix.lower()
 
@@ -516,5 +528,5 @@ async def get_ingestion_job_status(job_id: str):
 
 
 if __name__ == "__main__":
-    server_port = int(os.environ.get("PORT", 8000))
-    uvicorn.run("app.main:app", host="0.0.0.0", port=server_port, reload=True)
+    server_port = int(os.environ.get("PORT", 10000))
+    uvicorn.run("app.main:app", host="0.0.0.0", port=server_port, reload=False)

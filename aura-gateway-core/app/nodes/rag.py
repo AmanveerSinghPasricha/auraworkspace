@@ -35,12 +35,22 @@ from app.state import GraphState
 from app.services.docling_client import parse_pdf_via_api
 
 logger = logging.getLogger("vectorless_rag")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 os.environ["MALLOC_TRIM_THRESHOLD_"] = "65536"
-os.environ["OMP_NUM_THREADS"] = "2"
+os.environ["OMP_NUM_THREADS"] = "1"
 
 instructor_client = instructor.from_litellm(acompletion)
+
+# Global singleton for lazy-loading VectorlessEngine
+_vectorless_engine_instance: Optional["VectorlessEngine"] = None
+
+
+def get_vectorless_engine() -> "VectorlessEngine":
+    """Lazy-loads Vectorless Engine instance on first execution to keep app boot memory minimal."""
+    global _vectorless_engine_instance
+    if _vectorless_engine_instance is None:
+        _vectorless_engine_instance = VectorlessEngine()
+    return _vectorless_engine_instance
 
 
 # =====================================================================
@@ -60,14 +70,14 @@ class TreeNode(BaseModel):
         """Iteratively extracts unchunked text and tables for this node and all child nodes."""
         text_blocks = ["\n".join(self.content_blocks)]
         stack = list(reversed(self.children))
-        
+
         while stack:
             curr = stack.pop()
             if curr.content_blocks:
                 text_blocks.append("\n".join(curr.content_blocks))
             if curr.children:
                 stack.extend(reversed(curr.children))
-                
+
         return "\n\n".join(filter(None, text_blocks)).strip()
 
 
@@ -96,10 +106,10 @@ class VectorlessEngine:
     def _build_tree_from_docling_dict(self, doc_dict: dict, root_title: str) -> TreeNode:
         """Constructs a properly nested TreeNode hierarchy from raw Docling JSON schema using a level stack."""
         root = TreeNode(title=root_title, level=0)
-        
+
         texts = doc_dict.get("texts", [])
         tables = doc_dict.get("tables", [])
-        
+
         if not texts and not tables:
             root.content_blocks.append(json.dumps(doc_dict, indent=2))
             return root
@@ -117,16 +127,16 @@ class VectorlessEngine:
 
             if "header" in label or "title" in label:
                 level = 1 if "title" in label else 2
-                
+
                 # Pop deeper nodes until we locate parent level
                 while node_stack and node_stack[-1][0] >= level:
                     node_stack.pop()
 
                 parent_node = node_stack[-1][1] if node_stack else root
-                
+
                 new_node = TreeNode(
-                    title=content, 
-                    level=level, 
+                    title=content,
+                    level=level,
                     page_numbers=[page_no],
                     parent_id=parent_node.node_id
                 )
@@ -162,7 +172,7 @@ class VectorlessEngine:
         """
         all_nodes: List[TreeNode] = []
         queue = [root_node]
-        
+
         while queue:
             curr = queue.pop(0)
             all_nodes.append(curr)
@@ -171,10 +181,10 @@ class VectorlessEngine:
                 queue.append(child)
 
         top_level_nodes = [
-            n for n in all_nodes 
+            n for n in all_nodes
             if n.level <= 1 and len(n.full_content().split()) >= 15
         ]
-        
+
         logger.info(
             f"🚀 [LAZY INDEXING] Summarizing {len(top_level_nodes)} main chapters via LLM API "
             f"(Skipping {len(all_nodes) - len(top_level_nodes)} inner nodes/boilerplate)..."
@@ -191,7 +201,7 @@ class VectorlessEngine:
         async def summarize_parent_node(index: int, node: TreeNode):
             raw_text = node.full_content()
             async with semaphore:
-                await asyncio.sleep(2.5)
+                await asyncio.sleep(1.0)
                 logger.info(f" Summarizing Chapter [{index + 1}/{len(top_level_nodes)}]: '{node.title}'...")
 
                 models_to_try = [settings.LLM_RAG_PRIMARY, settings.LLM_RAG_FALLBACK]
@@ -212,8 +222,8 @@ class VectorlessEngine:
                         logger.info(f"  ✅ [{target_model}] Summarized '{node.title}'")
                         return
                     except RateLimitError:
-                        logger.warning(f"  ⏳ Rate limit on '{target_model}' for '{node.title}'. Waiting 4s...")
-                        await asyncio.sleep(4.0)
+                        logger.warning(f"  ⏳ Rate limit on '{target_model}' for '{node.title}'. Waiting 2s...")
+                        await asyncio.sleep(2.0)
                     except Exception as e:
                         logger.warning(f"  ⚠️ Attempt failed on '{target_model}' for '{node.title}': {e}")
 
@@ -272,7 +282,7 @@ class VectorlessRouter:
         while queue:
             curr, path = queue.pop(0)
             current_path = path + [curr.title]
-            
+
             flat_list.append({
                 "node_id": curr.node_id,
                 "title": curr.title,
@@ -294,27 +304,22 @@ class VectorlessRouter:
         - Zero hardcoded regex, zero hardcoded section codes.
         - Uses BM25/IDF score ranking over structural node titles & summaries.
         """
-        # 1. Index document nodes into flat candidates
         all_candidates = self._flatten_tree_index(root_tree)
         if not all_candidates:
             return False, [root_tree.node_id], None
 
-        # Filter out tiny boilerplate / Table of Contents entries (< 10 words)
         content_nodes = [c for c in all_candidates if c["word_count"] >= 10]
         if not content_nodes:
             content_nodes = all_candidates
 
-        # 2. General BM25 Candidate Ranking (Zero Domain Assumptions)
         query_tokens = [t.lower() for t in re.findall(r'\b\w+\b', query) if len(t) > 1]
         doc_count = len(content_nodes)
-        
-        # Calculate Inverse Document Frequency (IDF) for query terms
+
         idf = {}
         for token in query_tokens:
             n_containing = sum(1 for c in content_nodes if token in (c["title"] + " " + c["summary"]).lower())
             idf[token] = math.log((doc_count - n_containing + 0.5) / (n_containing + 0.5) + 1.0)
 
-        # Score candidates using BM25 parameters (k1=1.5, b=0.75)
         avg_len = sum(len((c["title"] + " " + c["summary"]).split()) for c in content_nodes) / max(doc_count, 1)
         k1, b = 1.5, 0.75
 
@@ -335,14 +340,11 @@ class VectorlessRouter:
 
             scored_nodes.append((score, candidate))
 
-        # Sort candidates descending by score
         scored_nodes.sort(key=lambda x: x[0], reverse=True)
         top_pruned_candidates = [item[1]["node_ref"] for item in scored_nodes[:20]]
 
-        # Prepare lightweight serialized index for the LLM Navigation Agent
         pruned_index = [self.engine.get_lightweight_index(c, max_depth=0) for c in top_pruned_candidates]
 
-        # 3. LLM Structural Intent Router (Evaluates semantic relevance)
         pass1_prompt = f"""You are an enterprise document routing agent.
 Analyze the user query against the candidate document sections.
 
@@ -383,14 +385,14 @@ def fetch_node_content(node: TreeNode, target_ids: List[str]) -> List[str]:
     """Retrieves full text and tables recursively from target node IDs and child branches."""
     extracted = []
     queue = [node]
-    
+
     while queue:
         curr = queue.pop(0)
         if curr.node_id in target_ids:
             extracted.append(f"### {curr.title} (Pages: {curr.page_numbers})\n{curr.full_content()}")
         if curr.children:
             queue.extend(curr.children)
-            
+
     return extracted
 
 
@@ -455,13 +457,11 @@ async def answer_vectorless_query(query: str, file_path: str, engine: Vectorless
 # =====================================================================
 # 5. LANGGRAPH NODE EXECUTION WRAPPER
 # =====================================================================
-_vectorless_engine_instance = VectorlessEngine()
-
-
 async def rag_node(state: GraphState) -> Dict[str, Any]:
     """LangGraph execution node for the Vectorless RAG Engine with Smart Multi-Document Resolver."""
     logger.info("📚 [RAG NODE] Processing query via Vectorless RAG Engine...")
 
+    engine = get_vectorless_engine()
     staged_payload = state.get("staged_action_payload") if isinstance(state, dict) else getattr(state, "staged_action_payload", {})
     messages = state.get("messages", []) if isinstance(state, dict) else getattr(state, "messages", [])
     router_state = state.get("router_state") if isinstance(state, dict) else getattr(state, "router_state", None)
@@ -473,15 +473,12 @@ async def rag_node(state: GraphState) -> Dict[str, Any]:
 
     doc_path = None
 
-    # Priority 1: Explicitly specified in payload
     if staged_payload and staged_payload.get("document_ref"):
         doc_path = staged_payload.get("document_ref")
 
-    # Priority 2: Session Thread State Memory
     if not doc_path and router_state:
         doc_path = getattr(router_state, "last_document_ref", None)
 
-    # Priority 3: Smart Filename Matching against User Query Intent
     upload_dir = Path("./uploads")
     if not doc_path or not os.path.exists(doc_path):
         if upload_dir.exists():
@@ -491,23 +488,21 @@ async def rag_node(state: GraphState) -> Dict[str, Any]:
                 for file_entry in all_uploads:
                     clean_name = file_entry.name.lower()
                     base_name = clean_name.split("_", 1)[-1] if "_" in clean_name else clean_name
-                    
+
                     if base_name in query_lower or clean_name in query_lower:
                         doc_path = str(file_entry)
                         logger.info(f"🎯 [RAG RESOLVER] Matched file from prompt intent: {file_entry.name}")
                         break
 
-                # Priority 4: Single File System Guard (Safe when 1 document exists)
                 if not doc_path and len(all_uploads) == 1:
                     doc_path = str(all_uploads[0])
                     logger.info(f"📌 [RAG RESOLVER] Auto-bound single available document: {doc_path}")
 
-    # Priority 5: Disambiguation Guard when multiple files exist and none was specified
     if not doc_path or not os.path.exists(doc_path):
         if upload_dir.exists() and len(list(upload_dir.glob("*"))) > 1:
             available_files = [f.name.split("_", 1)[-1] for f in upload_dir.glob("*")]
             file_list_str = "\n".join([f"- {name}" for name in available_files])
-            
+
             return {
                 "messages": [AIMessage(
                     content=f"You have multiple documents uploaded. Please specify which document you'd like to query:\n\n{file_list_str}"
@@ -524,7 +519,7 @@ async def rag_node(state: GraphState) -> Dict[str, Any]:
         result = await answer_vectorless_query(
             query=resolved_query,
             file_path=doc_path,
-            engine=_vectorless_engine_instance
+            engine=engine
         )
 
         finops_ledger = state.get("finops_ledger") if isinstance(state, dict) else getattr(state, "finops_ledger", None)
@@ -534,7 +529,7 @@ async def rag_node(state: GraphState) -> Dict[str, Any]:
             usage = result["usage"]
             prompt_details = getattr(usage, "prompt_tokens_details", None)
             cached_tokens = 0
-            
+
             if isinstance(prompt_details, dict):
                 cached_tokens = prompt_details.get("cached_tokens", 0)
             elif prompt_details is not None:
