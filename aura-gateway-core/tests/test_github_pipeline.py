@@ -69,7 +69,7 @@ async def test_step_1_db_token():
 
 @pytest.mark.asyncio
 async def test_step_2_intent_extraction():
-    """Step 2: Verify parameter extraction across different prompt types."""
+    """Step 2: Verify parameter extraction across different prompt types using mocked responses (0 token consumption)."""
     print("\n--- STEP 2: INTENT EXTRACTION UNIT TEST ---")
     
     mock_search = GitHubToolCallSchema(
